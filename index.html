@@ -5899,7 +5899,7 @@ let _toastTmr=null;
 function toast(t){const el=$('toast');el.textContent=t;el.classList.add('show');clearTimeout(_toastTmr);_toastTmr=setTimeout(()=>el.classList.remove('show'),2400)}
 function fmtTime(ts){if(!ts)return'';const d=new Date(ts),n=new Date();
   const hm=String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
-  return d.toDateString()===n.toDateString()?hm:(d.getMonth()+1)+'/'+d.getDate()+' '+hm}
+  return d.toDateString()===n.toDateString()?hm:(d.getFullYear()===n.getFullYear()?(d.getMonth()+1)+'/'+d.getDate()+' '+hm:d.getFullYear()+'/'+(d.getMonth()+1)+'/'+d.getDate()+' '+hm)}
 function openSheet(id){$(id).classList.add('open');$('sheet-scrim').classList.add('show')}
 function closeSheets(){document.querySelectorAll('.sheet.open').forEach(s=>s.classList.remove('open'));$('sheet-scrim').classList.remove('show')}
 $('sheet-scrim').addEventListener('click',closeSheets);
