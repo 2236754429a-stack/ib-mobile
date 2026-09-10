@@ -4188,6 +4188,7 @@ const IBSyncClient = (function(){
   }
 
   function recordChange(store, recordId, op, record) {
+    if (window._ibImporting) return;
     if (_syncApplying) return;
     if (!SYNC_STORES.includes(store)) return;
     
@@ -4452,7 +4453,21 @@ const IBSyncClient = (function(){
 })();
 
 function dbPut(s,v){return new Promise((res,rej)=>{const tx=db.transaction(s,'readwrite');tx.objectStore(s).put(v);tx.oncomplete=()=>{try{if(typeof IBSyncClient!=='undefined'){const key=(v&&(v.id||v.name))||'';if(key)IBSyncClient.recordChange(s,key,'put',v)}}catch(e){}res()};tx.onerror=()=>rej(tx.error)})}
-function dbPutAll(s,arr){return new Promise((res,rej)=>{const tx=db.transaction(s,'readwrite');const st=tx.objectStore(s);arr.forEach(v=>{try{st.put(v)}catch(e){}});tx.oncomplete=()=>{try{if(typeof IBSyncClient!=='undefined'){for(const v of arr){const key=(v&&(v.id||v.name))||'';if(key)IBSyncClient.recordChange(s,key,'put',v)}}}catch(e){}res()};tx.onerror=()=>rej(tx.error)})}
+async function dbPutAll(s,arr){
+  if(!arr||!arr.length)return 0;
+  const BATCH=400;
+  for(let i=0;i<arr.length;i+=BATCH){
+    const chunk=arr.slice(i,i+BATCH);
+    await new Promise((res,rej)=>{
+      const tx=db.transaction(s,'readwrite');
+      const st=tx.objectStore(s);
+      for(let j=0;j<chunk.length;j++){try{st.put(chunk[j])}catch(e){}}
+      tx.oncomplete=()=>{_ibFsDirty=true;res()};
+      tx.onerror=()=>rej(tx.error);
+    });
+  }
+  return arr.length;
+}
 function dbDelete(s,k){return new Promise((res,rej)=>{const tx=db.transaction(s,'readwrite');tx.objectStore(s).delete(k);tx.oncomplete=()=>{try{if(typeof IBSyncClient!=='undefined'&&k)IBSyncClient.recordChange(s,String(k),'delete',null)}catch(e){}res()};tx.onerror=()=>rej(tx.error)})}
 function dbDeleteMany(s,keys){return new Promise((res,rej)=>{const tx=db.transaction(s,'readwrite');const st=tx.objectStore(s);keys.forEach(k=>{try{st.delete(k)}catch(e){}});tx.oncomplete=()=>{try{if(typeof IBSyncClient!=='undefined'){for(const k of keys){if(k)IBSyncClient.recordChange(s,String(k),'delete',null)}}}catch(e){}res()};tx.onerror=()=>rej(tx.error)})}
 /* 好友最近一条主线消息（游标逆序，不整仓读取） */
