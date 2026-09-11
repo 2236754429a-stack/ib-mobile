@@ -149,7 +149,7 @@
   /* ── 设置 / 存档 ── */
   async function loadS(){try{var s=await ctx.storage.get('cfg');if(s&&typeof s==='object'){Object.keys(OPT).forEach(function(k){if(s[k]===undefined)return;if(OPT[k].some(function(o){return String(o[0])===String(s[k])}))S[k]=(typeof OPT[k][0][0]==='number')?Number(s[k]):String(s[k])});if(typeof s.lastAi==='string')S.lastAi=s.lastAi}}catch(e){}}
   function saveS(){try{ctx.storage.set('cfg',S)}catch(e){}}
-  function filmRec(){return {key:F.key,title:F.title,name:F.name,size:F.size,dur:F.dur||0,sec:0,done:!!F.done,cfgId:sess?sess.cfgId:(F.cfgId||''),threadId:sess?sess.threadId:(F.threadId||''),subName:subName||'',subN:subs.length,updated:Date.now()}}
+  function filmRec(){return {key:F.key,title:F.title,name:F.name,isNet:!!F.isNet,size:F.size,dur:F.dur||0,sec:0,done:!!F.done,cfgId:sess?sess.cfgId:(F.cfgId||''),threadId:sess?sess.threadId:(F.threadId||''),subName:subName||'',subN:subs.length,updated:Date.now()}}
   function saveFilm(){if(!F)return;clearTimeout(saveT);saveT=setTimeout(function(){try{if(F)ctx.storage.set('film_'+F.key,filmRec())}catch(e){}},600)}
   /* ── 字幕：只进内存 ── */
   function decode(buf){try{return new TextDecoder('utf-8',{fatal:true}).decode(buf)}catch(e){}try{return new TextDecoder('gb18030').decode(buf)}catch(e){}return new TextDecoder('utf-8').decode(buf)}
@@ -248,7 +248,7 @@
   /* ── 画面：抓帧 / 留影 ── */
   function grabFrame(){try{if(!V||!V.videoWidth)return '';var vq=VQ[S.vq]||VQ.m;var w=Math.min(vq.e,V.videoWidth),h=Math.round(V.videoHeight*w/V.videoWidth);var c=document.createElement('canvas');c.width=w;c.height=h;c.getContext('2d').drawImage(V,0,0,w,h);return c.toDataURL('image/jpeg',vq.q)}catch(e){return ''}}
   function paintChip(){var on=!!held;['.ci-chip','.ci-fchip'].forEach(function(s){var el=q(s);if(!el)return;el.classList.toggle('on',on);var im=el.querySelector('img');if(im)im.src=on?held:''});['#ci-cam','#ci-fcam'].forEach(function(s){var b=q(s);if(b)b.classList.toggle('on',on)})}
-  function snap(){if(!sess||!canSee()){toast('这位 TA 的 API 不识图，留影发不了画面');return}var f=grabFrame();if(!f){toast('画面还没准备好');return}held=f;vib();paintChip();toast(S.keep?'已夹住这一帧，随下一句发出并留在聊天里':'已夹住这一帧，随下一句发给 TA（不落库）')}
+  function snap(){if(!sess||!canSee()){toast('这位 TA 的 API 不识图，留影发不了画面');return}var f=grabFrame();if(!f){toast(F&&F.isNet?'画面尚未就绪，或源站不允许跨域截图':'画面还没准备好');return}held=f;vib();paintChip();toast(S.keep?'已夹住这一帧，随下一句发出并留在聊天里':'已夹住这一帧，随下一句发给 TA（不落库）')}
   function unsnap(){held='';paintChip()}
   function curInput(){var fi=q('#ci-fin');if(fs&&fi)return fi;return q('.ci-ta')}
   async function sendNote(){
@@ -301,7 +301,7 @@
     return '<div class="ci-card go" data-key="'+esc(f.key)+'"><div class="ci-tile"><b>'+(f.done?'END':'▶')+'</b><small>'+(f.done?'seen':'watched')+'</small></div>'
       +'<div class="ci-cm"><div class="ci-ct">'+esc(f.title)+'</div><div class="ci-cs">'+(f.done?'已看完':'看过')+(f.dur?(' · 全长 '+fmt(f.dur)):'')+(f.cfgId?(' · 和 '+esc(aiName(f.cfgId)||'TA')+' 一起'):'')+'</div>'
       +'<div class="ci-meta">'+(f.subName?('<span class="ci-pill">字幕 '+esc(short(f.subName,18))+'</span>'):'<span class="ci-pill">无字幕</span>')+'<span>'+esc(short(f.name||'',30))+'</span></div>'
-      +'<div class="ci-cs dim">视频不入库、不记进度：点开后重选这个文件即从头再看</div></div><span class="ci-x" data-del="'+esc(f.key)+'" title="删除记录">×</span></div>';
+      +'<div class="ci-cs dim">视频不入库、不记进度：点开后重新提供原文件或直链即从头再看</div></div><span class="ci-x" data-del="'+esc(f.key)+'" title="删除记录">×</span></div>';
   }
   async function paintLib(){
     if(!host)return;host.innerHTML='<div class="ci"><div class="ci-lib"><div class="ci-empty">读取片库…</div></div></div>';
@@ -315,6 +315,7 @@
       +'<div class="ci-who"><div class="f-group"><label>和谁一起看</label><div class="sel"><select id="ci-ai">'+(aiList.length?aiList.map(function(a){return '<option value="'+esc(a.id)+'"'+(a.id===aiId?' selected':'')+'>'+esc(a.name)+'</option>'}).join(''):'<option value="">还没有 1对1 对话</option>')+'</select></div></div>'
       +'<button class="ci-pick" id="ci-pick"><svg viewBox="0 0 24 24" style="width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round"><rect x="3.5" y="5.5" width="17" height="13" rx="2.5"/><path d="M10 9.5v5l4.2-2.5z"/></svg>选一部片</button>'
       +'<input type="file" id="ci-file" accept="video/*" style="display:none"><input type="file" id="ci-sub" accept=".srt,.vtt,text/vtt,text/plain" style="display:none"></div>'
+      +'<div class="f-group" style="margin-top:12px"><label for="ci-net-url">网络视频直链</label><input class="ci-ti" id="ci-net-url" type="url" inputmode="url" placeholder="https://…/video.mp4 或 playlist.m3u8"><div class="ci-btns"><button class="ci-mini acc" id="ci-pick-net">打开网络视频</button></div><div class="ci-cs dim">支持 HTTP(S) 的 MP4 / WebM / M4V / MOV / M3U8 直链；普通平台播放页与 DRM 不支持，源站须允许跨域访问。</div></div>'
       +'<div id="ci-pend"></div>'
       +'<div class="ci-lab">观影历史</div><div id="ci-films">'+(films.length?films.map(filmCard).join(''):'<div class="ci-empty">还没有一起看过的片。选一段手机里的视频开始。</div>')+'</div>'
       +'<div class="ci-empty" style="padding:8px 4px 0;font-size:0.68rem;color:var(--tx3)">视频与字幕都不入库，也不记进度，只记片名与文件名；历史里的片点开后重选同一个文件即从头再看 · 聊天落在 TA 的「观影室 · 片名」频道里 · 在线平台与 DRM 内容不支持</div>'
@@ -322,6 +323,17 @@
     q('#ci-close').addEventListener('click',function(){ctx.ui.close()});
     var sel=q('#ci-ai');if(sel)sel.addEventListener('change',function(){aiId=sel.value;if(pend)paintPending()});
     var fi=q('#ci-file');q('#ci-pick').addEventListener('click',function(){pend=null;var b=q('#ci-pend');if(b)b.innerHTML='';fi.click()});
+    
+    var btnNet = q('#ci-pick-net');
+    if(btnNet){
+      btnNet.addEventListener('click', function(){
+        var inp = q('#ci-net-url');
+        var u = inp && inp.value && inp.value.trim();
+        if(!u){ toast('请输入视频地址'); return; }
+        pickNetworkFilm(u);
+      });
+    }
+
     fi.addEventListener('change',function(){var f=fi.files&&fi.files[0];fi.value='';if(f)pickFilm(f)});
     q('#ci-sub').addEventListener('change',function(){var inp=q('#ci-sub');var f=inp&&inp.files&&inp.files[0];if(inp)inp.value='';if(f)loadSubFile(f)});
     Array.prototype.forEach.call(host.querySelectorAll('.ci-card.go'),function(r){r.addEventListener('click',function(ev){var x=ev.target.closest('.ci-x');if(x){delFilm(x.getAttribute('data-del'));return}var key=r.getAttribute('data-key');var rec=films.filter(function(f){return f.key===key})[0];if(!rec)return;
@@ -335,6 +347,22 @@
     if(!await ctx.ui.confirm('删除这部片的观影记录？'+((rec&&rec.threadId)?('它的「观影室 · '+short(rec.title||'',16)+'」频道和里面的聊天会一起删除。'):'')+'此操作不可恢复。','删除'))return;
     if(rec&&rec.threadId){try{await ctx.chat.deleteThread(rec.threadId)}catch(e){}}
     for(var i=0,ks=['film_','sum_','sub_','notes_'];i<ks.length;i++){try{await ctx.storage.remove(ks[i]+key)}catch(e){}}delete SUBS[key];if(pend&&pend.key===key)pend=null;paintLib()}
+  
+  async function pickNetworkFilm(url){
+    var parsed;
+    try{parsed=new URL(String(url||'').trim())}catch(e){toast('请输入完整的视频直链（https://…/video.mp4 或 .m3u8）');return}
+    if(!/^https?:$/.test(parsed.protocol)||parsed.username||parsed.password){toast('只支持不含账号密码的 HTTP / HTTPS 视频直链');return}
+    if(window.location&&window.location.protocol==='https:'&&parsed.protocol==='http:'){toast('当前页面使用 HTTPS，请换用 HTTPS 视频直链');return}
+    if(!/\.(mp4|webm|m4v|mov|m3u8)$/i.test(parsed.pathname)){toast('这不像视频直链：请提供以 .mp4 / .webm / .m4v / .mov / .m3u8 结尾的地址（可带查询参数），普通平台播放页不支持');return}
+    var clean=parsed.href,name=parsed.pathname.split('/').pop();
+    try{name=decodeURIComponent(name)}catch(e){}
+    var base='net_'+hash(clean),rec=null,key=base+'_'+Date.now().toString(36);
+    if(pend&&pend.rec&&pend.rec.isNet&&String(pend.rec.key).indexOf(base+'_')===0){rec=pend.rec;key=rec.key}
+    pend={file:null,isNet:true,netUrl:clean,key:key,title:rec?rec.title:titleOf(name),size:0,rec:rec,sub:SUBS[key]||null};
+    if(!host) return;
+    paintPending();
+  }
+
   async function pickFilm(file){var base=keyOf(file),key,rec=null;/* 1.12.0：「选一部片」一律新开一条记录与频道（key 带时间后缀，同一部片可以有多条记录，各自一条频道）；只有从观影历史点那条记录再看，才接着原来的记录与频道 */
     if(pend&&pend.rec&&!pend.file){var rk=String(pend.rec.key||'');
       if(rk===base||rk.indexOf(base+'_')===0){key=rk;rec=pend.rec}
@@ -343,28 +371,29 @@
     pend={file:file,key:key,title:rec?rec.title:titleOf(file.name),size:file.size,rec:rec,sub:SUBS[key]||null};if(!host)return;paintPending()}
   function paintPending(){
     var box=q('#ci-pend');if(!box||!pend)return;var rec=pend.rec,f=pend.file;
-    var szMb=(pend.size/1048576).toFixed(1);
-    if(!f){/* 只有记录、还没重选文件：先把上次的情况摆出来，按钮才弹选择器 */
+    var szMb=(pend.isNet||(rec&&rec.isNet))?'网络视频':((pend.size||0)/1048576).toFixed(1)+' MB';
+    if(!f&&!pend.isNet){/* 只有记录、还没重选文件：先把上次的情况摆出来，按钮才弹选择器 */
       box.innerHTML='<div class="ci-lab">待开始</div><div class="ci-card"><div class="ci-tile"><b>'+(rec&&rec.done?'END':'▶')+'</b><small>'+(rec&&rec.done?'seen':'again')+'</small></div>'
-        +'<div class="ci-cm"><div class="ci-ct">'+esc(pend.title)+'</div><div class="ci-cs">'+esc(short(rec.name||'',40))+' · '+szMb+' MB · 和 <i>'+esc(aiName(aiId)||'TA')+'</i> 一起看<br>'+(rec.done?'上次已看完，':'')+'重选文件后从头再看（不记进度）</div>'
+        +'<div class="ci-cm"><div class="ci-ct">'+esc(pend.title)+'</div><div class="ci-cs">'+esc(short(rec.name||'',40))+' · '+szMb+' · 和 <i>'+esc(aiName(aiId)||'TA')+'</i> 一起看<br>'+(rec.done?'上次已看完，':'')+'重选文件后从头再看（不记进度）</div>'
         +'<div class="ci-cs" style="margin-top:6px">'+(pend.sub?('字幕：'+esc(short(pend.sub.name,30))+' · '+pend.sub.cues.length+' 条'):((rec&&rec.subName)?('上次用的字幕：'+esc(short(rec.subName,30))+'（字幕不入库，选好视频后再选一次）'):'上次没有字幕'))+'</div>'
         +'<div class="ci-btns"><button class="ci-mini acc" id="ci-repick2">选这个视频文件</button><button class="ci-mini" id="ci-cancel">取消</button></div>'
-        +'<div class="ci-cs dim" style="margin-top:8px">视频文件不入库、不记进度，每次都要从手机里重选同一个（文件名 '+esc(short(rec.name||'',24))+'）。</div></div></div>';
-      q('#ci-repick2').addEventListener('click',function(){var fi=q('#ci-file');if(fi)fi.click()});
+        +'<div class="ci-cs dim" style="margin-top:8px">视频不入库、不记进度，每次需重新提供原视频（名称 '+esc(short(rec.name||'',24))+'）。</div></div></div>';
+      q('#ci-repick2').textContent=rec.isNet?'重新输入视频直链':'选这个视频文件';
+      q('#ci-repick2').addEventListener('click',function(){var fi=q(rec.isNet?'#ci-net-url':'#ci-file');if(fi){if(rec.isNet)fi.focus();else fi.click()}});
       q('#ci-cancel').addEventListener('click',function(){pend=null;box.innerHTML=''});
       return;
     }
     box.innerHTML='<div class="ci-lab">待开始</div><div class="ci-card"><div class="ci-tile"><b>NEW</b><small>film</small></div>'
-      +'<div class="ci-cm"><input class="ci-ti" id="ci-title" maxlength="60" value="'+esc(pend.title)+'" placeholder="片名"><div class="ci-cs">'+esc(short(f.name,40))+' · '+szMb+' MB · 和 <i>'+esc(aiName(aiId)||'TA')+'</i> 一起看</div>'
+      +'<div class="ci-cm"><input class="ci-ti" id="ci-title" maxlength="60" value="'+esc(pend.title)+'" placeholder="片名"><div class="ci-cs">'+esc(short(f?f.name:pend.netUrl,40))+' · '+szMb+' · 和 <i>'+esc(aiName(aiId)||'TA')+'</i> 一起看</div>'
       +'<div class="ci-cs" style="margin-top:6px">'+(pend.sub?('字幕：'+esc(short(pend.sub.name,30))+' · '+pend.sub.cues.length+' 条'):((rec&&rec.subName)?('上次用的字幕：'+esc(short(rec.subName,30))+'（字幕不入库，再选一次）'):'还没有字幕文件（.srt / .vtt）'))+'</div>'
       +'<div class="ci-btns"><button class="ci-mini" id="ci-pick-sub">'+(pend.sub?'换字幕文件':'选字幕文件')+'</button><button class="ci-mini acc" id="ci-start">'+(pend.sub?'开始':'没有字幕，直接开始')+'</button><button class="ci-mini" id="ci-cancel">取消</button></div></div></div>';
-    q('#ci-title').addEventListener('input',function(ev){pend.title=String(ev.target.value||'').trim().slice(0,60)||titleOf(pend.file.name)});
+    q('#ci-title').addEventListener('input',function(ev){pend.title=String(ev.target.value||'').trim().slice(0,60)||titleOf(pend.file?pend.file.name:new URL(pend.netUrl).pathname.split('/').pop())});
     q('#ci-pick-sub').addEventListener('click',function(){q('#ci-sub').click()});
     q('#ci-start').addEventListener('click',function(){startFilm()});
     q('#ci-cancel').addEventListener('click',function(){pend=null;box.innerHTML=''});
   }
   async function loadSubFile(file){
-    if(!pend||!pend.file){toast('先选好视频文件，再选字幕');return}try{var buf=await file.arrayBuffer();var cues=parseSubs(decode(buf));if(!cues.length){toast('没读到字幕（认 .srt / .vtt 的时间轴格式）');return}pend.sub={name:file.name,cues:cues};SUBS[pend.key]=pend.sub;toast('字幕 '+cues.length+' 条（只进内存，不入库）');paintPending()}catch(e){toast('字幕读取失败')}
+    if(!pend||(!pend.file&&!pend.isNet)){toast('先选好视频文件或网络直链，再选字幕');return}var target=pend;try{var buf=await file.arrayBuffer();if(pend!==target)return;var cues=parseSubs(decode(buf));if(!cues.length){toast('没读到字幕（认 .srt / .vtt 的时间轴格式）');return}pend.sub={name:file.name,cues:cues};SUBS[pend.key]=pend.sub;toast('字幕 '+cues.length+' 条（只进内存，不入库）');paintPending()}catch(e){toast('字幕读取失败')}
   }
   /* ── 视频读取：先探「能不能从文件中间读」，不行就顺序整个读进内存（不 slice、不 seek）再喂播放器；行就直挂 ──
      安卓浏览器 / WebView 从系统选择器拿到的 content:// 文件，在有些机器上不支持随机读：顺序播放没事，续播 / 拖进度条 / «10 10» 一 seek 播放器就报错，分块 slice 读也报 NotReadableError（「新片能放、看过的不能放、删掉记录就能放」就是这个）。 */
@@ -379,18 +408,66 @@
     if(!F||!F.file||F.seekOk!==undefined)return;var key=F.key;var ok=await probeSeek(F.file);if(!F||F.key!==key)return;F.seekOk=ok;
     if(!ok)toast('这台机器读不了文件中间：只能顺着放，拖不了进度条');
   }
-  function attachStart(){/* 开播入口：一律直挂，不读进内存 */if(!F||!V||!F.file)return;attach(F.url)}
+  
+  var _hlsInstance=null,_hlsScript=null,_hlsTimer=null,_videoGeneration=0;
+  var _hlsSrc=new URL('vendor/hls-1.6.13.min.js',document.currentScript&&document.currentScript.src||new URL('apps/ib-app-cinema.js',document.baseURI).href).href;
+  function destroyHls(){
+    if(_hlsInstance){var old=_hlsInstance;_hlsInstance=null;try{old.destroy()}catch(e){}}
+  }
+  function cancelHlsLoad(){
+    clearTimeout(_hlsTimer);_hlsTimer=null;
+    if(_hlsScript){_hlsScript.onload=_hlsScript.onerror=null;_hlsScript.remove();_hlsScript=null}
+  }
+  function loadHlsAndAttach(url){
+    var video=V,film=F,generation=++_videoGeneration;
+    cancelHlsLoad();destroyHls();clearTimeout(wdT);
+    function current(){return generation===_videoGeneration&&V===video&&F===film}
+    function fail(msg){if(!current())return;clearTimeout(wdT);cancelHlsLoad();destroyHls();setFail(msg,'请检查直链是否过期、源站是否允许 CORS 跨域访问；普通平台播放页与 DRM 不支持。')}
+    if(video.canPlayType('application/vnd.apple.mpegurl')||video.canPlayType('application/x-mpegURL')){attach(url);return}
+    function ready(){
+      if(!current())return;
+      cancelHlsLoad();
+      var H=window.Hls;
+      if(!H||!H.isSupported()){fail('当前浏览器不支持 HLS 播放，请换用 MP4 直链');return}
+      try{
+        var h=new H();_hlsInstance=h;
+        h.on(H.Events.MANIFEST_PARSED,function(){if(!current()||_hlsInstance!==h)return;try{var p=video.play();if(p&&p.catch)p.catch(function(){})}catch(e){}});
+        h.on(H.Events.ERROR,function(ev,data){if(current()&&_hlsInstance===h&&data&&data.fatal)fail('HLS 视频加载失败，请更换可播放的视频直链')});
+        video.playbackRate=S.rate||1;armWatchdog();h.loadSource(url);h.attachMedia(video);
+      }catch(e){fail('HLS 播放器启动失败，请换用 MP4 直链')}
+    }
+    setBusy('正在加载 HLS 播放器…');
+    if(window.Hls){ready();return}
+    var sc=document.createElement('script');_hlsScript=sc;sc.src=_hlsSrc;
+    sc.onload=function(){if(current())ready()};
+    sc.onerror=function(){fail('HLS 播放器加载失败，请检查网络后重新打开视频')};
+    _hlsTimer=setTimeout(function(){fail('HLS 播放器加载超时，请重新打开视频')},15000);
+    document.head.appendChild(sc);
+  }
+
+  function attachStart(){
+    if(!F||!V)return;
+    if(F.isNet){
+      clearFail();
+      if(/\.m3u8$/i.test(new URL(F.url).pathname)){ loadHlsAndAttach(F.url); }
+      else { attach(F.url); }
+      return;
+    }
+    if(!F.file)return;
+    attach(F.url);
+  }
   function loadFail(kind){
     if(!F||!V)return;clearTimeout(wdT);
+    if(F.isNet){destroyHls();setFail(kind==='timeout'?'网络视频加载超时':'网络视频打不开','请检查视频直链是否过期、网络连接、源站 CORS 跨域权限与视频编码；普通平台播放页与 DRM 不支持。');return}
     var ei=kind==='timeout'?{code:0,why:'二十秒了还没读出元数据',msg:''}:errInfo();
     setFail('视频打不开：'+ei.why+'。这个文件是按原样直接交给播放器的（不读进内存）；如果这台机器的文件选择器给的文件不支持从中间读、而视频的索引又在文件尾，就会这样——换一段视频，或从系统「文件」App 的路径重选试试；mp4 / H.264 最稳。',ei.msg?('播放器原话：'+ei.msg):'');
   }
   /* ── 放映 ── */
-  function releaseVideo(){try{exitFs()}catch(e){}try{if(V){V.pause();V.removeAttribute('src');V.load()}}catch(e){}try{if(F&&F.url)URL.revokeObjectURL(F.url)}catch(e){}V=null}
+  function releaseVideo(){++_videoGeneration;cancelHlsLoad();destroyHls();clearTimeout(wdT);try{exitFs()}catch(e){}try{if(V){V.pause();V.removeAttribute('src');V.load()}}catch(e){}try{if(F&&F.url&&!F.isNet)URL.revokeObjectURL(F.url)}catch(e){}V=null}
   async function startFilm(){
-    if(!pend||!pend.file||!aiId){toast(!aiId?'先选一位 TA':'先选一部片');return}
+    if(!pend||(!pend.file&&!pend.netUrl)||!aiId){toast(!aiId?'先选一位 TA':'先选一部片');return}
     var p=pend;pend=null;
-    F={key:p.key,title:p.title,name:p.file.name,size:p.size,dur:(p.rec&&p.rec.dur)||0,sec:0,done:!!(p.rec&&p.rec.done),file:p.file,url:URL.createObjectURL(p.file),seekOk:undefined};/* 1.5.0：不续播，每次从头；1.11.0：seekOk 开播后才探 */
+    F={key:p.key,title:p.title,name:p.file?p.file.name:p.title,size:p.size||0,dur:(p.rec&&p.rec.dur)||0,sec:0,done:!!(p.rec&&p.rec.done),file:p.file,url:p.file?URL.createObjectURL(p.file):p.netUrl,seekOk:p.isNet?true:undefined,isNet:!!p.isNet};/* 1.5.0：不续播，每次从头；1.11.0：seekOk 开播后才探 */
     subs=p.sub?p.sub.cues:[];subName=p.sub?p.sub.name:'';held='';chatIds='';
     sum={text:'',upTo:0};try{var sv=await ctx.storage.get('sum_'+F.key);if(sv&&typeof sv==='object')sum={text:String(sv.text||''),upTo:Number(sv.upTo)||0}}catch(e){}
     if(!host||!F)return;
@@ -421,7 +498,7 @@
     var ai=aiList.filter(function(a){return a.id===aiId})[0];var an=ai?ai.name:'';
     var av='';try{var _a9=ctx.chat.avatars?ctx.chat.avatars(aiId):'';av=(typeof _a9==='string')?_a9:((_a9&&(_a9.ai||_a9.friend||_a9.url||_a9.src))||'');if(!/^(data:|blob:|https?:)/.test(String(av)))av=''}catch(e){}
     host.innerHTML='<div class="ci">'
-      +'<div class="ci-stage"><video playsinline webkit-playsinline preload="metadata" poster="data:image/gif;base64,R0lGODlhAQABAAAAACw="></video><div class="ci-cc"'+(S.cc?'':' hidden')+'></div><div class="ci-dm"></div>'
+      +'<div class="ci-stage"><video playsinline webkit-playsinline crossorigin="anonymous" preload="metadata" poster="data:image/gif;base64,R0lGODlhAQABAAAAACw="></video><div class="ci-cc"'+(S.cc?'':' hidden')+'></div><div class="ci-dm"></div>'
       +'<div class="ci-vfail"><span id="ci-vmsg"></span><small id="ci-vdet"></small><div class="ci-btns"><button class="ci-mini" id="ci-repick">重选文件</button></div></div><div class="ci-vbusy"></div>'
       +'<div class="ci-ui"><div class="ci-utop"><button class="ci-fb ic" id="ci-back" aria-label="返回"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button><div class="ci-ut">'+esc(F.title)+'</div><button class="ci-fb'+(F.done?' on':'')+'" id="ci-wrap">'+(F.done?'已看完':'整片聊聊')+'</button><button class="ci-fb ic" id="ci-gear" aria-label="设置">⋯</button></div>'
       +'<div class="ci-umid" id="ci-pp">'+IC.play+'</div>'
@@ -444,7 +521,8 @@
     V.addEventListener('pause',function(){paintTime();showUi()});
     V.addEventListener('ended',function(){paintTime();showUi();if(F&&!F.done)toast('播完了，可以按「整片聊聊」')});
     V.addEventListener('error',function(){loadFail('error')});
-    q('#ci-repick').addEventListener('click',async function(ev){ev.stopPropagation();var rec=filmRec();await leaveFilm();if(!host)return;await paintLib();var r2=films.filter(function(f){return f.key===rec.key})[0];pend={file:null,key:rec.key,title:rec.title,size:rec.size,rec:r2||rec,sub:SUBS[rec.key]||null};paintPending();var fi=q('#ci-file');if(fi)fi.click()});
+    q('#ci-repick').textContent=F.isNet?'更换视频直链':'重选文件';
+    q('#ci-repick').addEventListener('click',async function(ev){ev.stopPropagation();var rec=filmRec();await leaveFilm();if(!host)return;await paintLib();if(!host)return;if(rec.isNet){var ni=q('#ci-net-url');if(ni)ni.focus();return}var r2=films.filter(function(f){return f.key===rec.key})[0];pend={file:null,key:rec.key,title:rec.title,size:rec.size,rec:r2||rec,sub:SUBS[rec.key]||null};paintPending();var fi=q('#ci-file');if(fi)fi.click()});
     function togglePlay(){if(!V)return;if(V.paused)V.play().catch(function(){toast('播放失败')});else V.pause()}
     stage.addEventListener('click',function(ev){if(ev.target.closest('.ci-ubot,.ci-utop,.ci-vfail,.ci-umid'))return;if(stage.classList.contains('ui')&&V&&!V.paused)hideUi();else showUi()});
     q('#ci-pp').addEventListener('click',function(ev){ev.stopPropagation();togglePlay();showUi()});
@@ -498,7 +576,7 @@
       else if(k==='stage'){var c4=q('.ci');if(c4)c4.style.setProperty('--ci-mh',STAGE[S.stage]||STAGE.m)}
       else if(k==='nudge'&&sess)sess.lastAct=Date.now()}
   }
-  async function leaveFilm(){clearTimeout(saveT);clearTimeout(wdT);clearTimeout(uiT);clearInterval(pendT);pending=false;typ=null;if(F){try{await ctx.storage.set('film_'+F.key,filmRec())}catch(e){}}if(sess)await endSession();releaseVideo();F=null;subs=[];subName='';sum={text:'',upTo:0};lastSaved=-1;wrapBusy=false;held='';chatIds=''}
+  async function leaveFilm(){++_videoGeneration;cancelHlsLoad();destroyHls();clearTimeout(saveT);clearTimeout(wdT);clearTimeout(uiT);clearInterval(pendT);pending=false;typ=null;if(F){try{await ctx.storage.set('film_'+F.key,filmRec())}catch(e){}}if(sess)await endSession();releaseVideo();F=null;subs=[];subName='';sum={text:'',upTo:0};lastSaved=-1;wrapBusy=false;held='';chatIds=''}
   IBApps.register({
     id:'cinema',name:'观影室',version:'1.12.0',sdk:2,wall:true,headless:true,
     icon:'<rect x="3.5" y="6" width="17" height="12" rx="2.5"/><path d="M3.5 9.5h17M7.5 6v12M16.5 6v12"/><path d="M10.8 11v4l3.4-2z"/>',

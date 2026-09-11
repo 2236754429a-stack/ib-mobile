@@ -3267,10 +3267,10 @@ self.addEventListener(&#x27;fetch&#x27;,function(e){
           <span id="ib-sync-badge" style="font-size:11px;padding:2px 8px;border-radius:10px;background:rgba(100,160,240,0.15);color:var(--accent-light, #70a0e0)">未同步</span>
         </div>
         <p class="hint" style="margin-top:0;margin-bottom:10px">通过腾讯云私有服务，与电脑端实时双向同步聊天记录、话题、摘要、记忆与日历。密钥安全留存于本地。</p>
-        <div style="display:flex;gap:8px;margin-bottom:8px">
-          <button class="btn primary" style="flex:1" onclick="IBSyncClient.syncNow(true)">立即同步</button>
-          <button class="btn" style="width:70px" onclick="IBSyncClient.toggleSettings()">配置</button>
-          <button class="btn" style="padding:4px 8px;font-size:11px" onclick="IBSyncClient.uploadAllLocalData()">全量推上云</button>
+        <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+          <button class="btn primary" style="flex:1;min-width:110px" onclick="IBSyncClient.downloadAllFromCloud()">一键从云端拉取全量数据</button>
+          <button class="btn" style="padding:4px 10px;font-size:12px" onclick="IBSyncClient.syncNow(true)">增量同步</button>
+          <button class="btn" style="width:60px;font-size:12px" onclick="IBSyncClient.toggleSettings()">配置</button>
         </div>
         <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;opacity:0.85">
           <input type="checkbox" id="ib-sync-toggle" onchange="IBSyncClient.toggleAutoSync(this.checked)" style="accent-color:var(--accent)"> 自动后台静默同步
@@ -3368,7 +3368,10 @@ self.addEventListener(&#x27;fetch&#x27;,function(e){
     <div class="psec on" id="sec-blog-list">
       <div class="pg-hero"><div class="ph-title" id="blog-hero-t">Blog<span class="ph-cn">日志</span></div><div class="ph-stat" id="m-blog-stats" hidden>—</div></div>
       <button class="pill-lite" id="m-diary-keys" style="display:none"><svg viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="9" rx="2.5"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/><path d="M12 14.5v2"/></svg>修改密码与密保</button>
-      <div class="blog-sticky-bar"><div class="tool-row"><label class="spill"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg><input id="m-blog-search" placeholder="搜索标题、副标题、分类或内容…" autocomplete="off"></label></div></div>
+      <div class="blog-sticky-bar"><div class="tool-row" style="display:flex;gap:8px;align-items:center">
+  <button class="btn mini primary" type="button" style="flex:none;height:34px;padding:0 12px;font-size:12px;border-radius:17px" onclick="IBDocImporter.pickAndImport()">+ 导入图书/PDF</button>
+  <button class="btn mini" type="button" style="flex:none;height:34px;padding:0 10px;font-size:12px;border-radius:17px" onclick="IBDocImporter.importUrl()">输入链接</button>
+  <label class="spill" style="flex:1"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg><input id="m-blog-search" placeholder="搜索标题、副标题、分类或内容…" autocomplete="off"></label></div></div>
       <div id="m-posts"></div>
     </div>
     <div id="m-blog-read" style="display:none">
@@ -4112,6 +4115,384 @@ function dbGetByIndex(s,idx,val){return new Promise((res,rej)=>{const r=db.trans
 /* ═══════════════════════════════════════════════════════════════════
  * InternalBeyond Cloud Sync Client (腾讯云轻量同步客户端 - 移动端)
  * ═══════════════════════════════════════════════════════════════════ */
+
+/* ═══════════════════════════════════════════════════════════════════
+ * IBDocImporter: 多格式图书/PDF/文章导入引擎（赋能共读学习室）
+ * ═══════════════════════════════════════════════════════════════════ */
+
+
+function _wsZipList(bytes){
+  var buf=bytes,dv=new DataView(buf.buffer,buf.byteOffset,buf.byteLength);
+  var eocd=-1,lo=Math.max(0,buf.length-22-65535);
+  for(var i=buf.length-22;i>=lo;i--){if(dv.getUint32(i,true)===0x06054b50){eocd=i;break}}
+  if(eocd<0)throw new Error('不是有效的 ZIP 结构');
+  var count=dv.getUint16(eocd+10,true),cdOff=dv.getUint32(eocd+16,true);
+  if(count===0xffff||cdOff===0xffffffff)throw new Error('不支持 ZIP64');
+  var ents=[],p=cdOff;
+  for(var n=0;n<count;n++){
+    if(p+46>buf.length||dv.getUint32(p,true)!==0x02014b50)break;
+    var flags=dv.getUint16(p+8,true),method=dv.getUint16(p+10,true);
+    var csize=dv.getUint32(p+20,true),usize=dv.getUint32(p+24,true);
+    var nlen=dv.getUint16(p+28,true),elen=dv.getUint16(p+30,true),clen=dv.getUint16(p+32,true);
+    var lho=dv.getUint32(p+42,true);
+    var nm=_icodeZipName(buf.subarray(p+46,p+46+nlen),flags);
+    p+=46+nlen+elen+clen;
+    ents.push({name:nm,flags:flags,method:method,csize:csize,usize:usize,lho:lho});
+  }
+  return ents;
+}
+async function _wsZipRead(bytes,en){
+  var buf=bytes,dv=new DataView(buf.buffer,buf.byteOffset,buf.byteLength);
+  if(en.flags&0x1)throw new Error('加密条目');
+  var lp=en.lho;
+  if(lp+30>buf.length||dv.getUint32(lp,true)!==0x04034b50)throw new Error('条目头损坏');
+  var lnl=dv.getUint16(lp+26,true),lel=dv.getUint16(lp+28,true);
+  var start=lp+30+lnl+lel;
+  if(start+en.csize>buf.length)throw new Error('条目数据越界');
+  var raw=buf.subarray(start,start+en.csize);
+  if(en.method===0)return raw;
+  if(en.method===8){
+    if(typeof DecompressionStream==='undefined')throw new Error('浏览器不支持在线解压');
+    return new Uint8Array(await new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).arrayBuffer());
+  }
+  throw new Error('不支持的压缩方式');
+}
+function _wsXmlUnescape(s){
+  return String(s||'')
+    .replace(/&#x([0-9a-fA-F]+);/g,function(_,h){return String.fromCodePoint(parseInt(h,16))})
+    .replace(/&#(\d+);/g,function(_,d){return String.fromCodePoint(parseInt(d,10))})
+    .replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&apos;/g,"'").replace(/&amp;/g,'&');
+}
+/* ── ── 文本提取：返回纯文本字符串供 AI 注入。失败/受限时返回「[…]」 ── */
+var _wsRichTextCache={},_wsRichTextCacheKeys=[];
+function _wsRichCacheKey(f){return ((f&&(f.id||f.path||f.name))||'')+'|'+((f&&(f.lastModified||f.size))||'')}
+function _wsRichCacheDrop(f){
+  var key=_wsRichCacheKey(f);
+  if(_wsRichTextCache[key]!==undefined){delete _wsRichTextCache[key];var ix=_wsRichTextCacheKeys.indexOf(key);if(ix>-1)_wsRichTextCacheKeys.splice(ix,1)}
+}
+function _wsRichIsFailText(t){return typeof t==='string'&&t.charCodeAt(0)===91&&/(无法|失败|已加密|没有可提取|未就绪|不支持)/.test(t.slice(0,60))}
+/* 环境性失败（库未就绪/获取失败/执行失败）：属开关与网络状态而非文件本身的属性，不进提取缓存 */
+function _wsRichEnvFail(t){return /解析库(未就绪|获取失败|执行失败)/.test(String(t||'').slice(0,80))}
+async function _wsExtractRichText(f){
+  var name=f&&(f.path||f.name)||'';
+  var kind=_wsRichKind(name);
+  var content=f&&typeof f.content==='string'?f.content:'';
+  if(!kind||content.slice(0,5)!=='data:')return'[无法提取文本内容]';
+  var key=_wsRichCacheKey(f);
+  if(_wsRichTextCache[key]!==undefined)return _wsRichTextCache[key];
+  var text='';
+  try{
+    if(kind==='pdf')text=await _wsExtractPdfText(f);
+    else if(kind==='docx')text=await _wsExtractDocxText(content);
+    else if(kind==='xlsx'||kind==='xls')text=await _wsExtractXlsxText(content);
+    else if(kind==='pptx')text=await _wsExtractPptxText(_wsDataUrlToBytes(content));
+    else if(kind==='rtf')text=await _wsExtractRtfText(_wsDataUrlToBytes(content));
+    else if(kind==='epub')text=await _wsExtractEpubText(_wsDataUrlToBytes(content));
+  }catch(e){text=(e&&e._wsLibMsg)||''}
+  text=String(text||'').trim()||'[无法提取文本内容]';
+  if(!_wsRichEnvFail(text)){/* 环境性失败不缓存：用户开启开关或恢复联网后，同一文件重试即可正常提取 */
+    _wsRichTextCache[key]=text;_wsRichTextCacheKeys.push(key);
+    if(_wsRichTextCacheKeys.length>6)delete _wsRichTextCache[_wsRichTextCacheKeys.shift()];
+  }
+  return text;
+}
+/* PDF：带密码缓存的提取；无文字层（扫描件）时给出明确出路 */
+var _wsPdfPwCache={};
+async function _wsExtractPdfText(f){
+  var lib;
+  try{lib=await _wsLoadPdfJs()}catch(e){return (e&&e._wsLibMsg)||'[PDF 解析库未就绪：请在 DIY 页开启「文件解析库」后重试]'}
+  var pw=_wsPdfPwCache[f&&f.id];
+  var doc;
+  try{doc=await lib.getDocument(Object.assign({data:_wsDataUrlToBytes(f.content)},pw?{password:pw}:{})).promise}
+  catch(e){
+    if(e&&e.name==='PasswordException')return'[该 PDF 已加密：请先在 ICode 预览中打开它并输入密码，之后即可正常读取]';
+    return'[PDF 解析失败：文件可能已损坏]';
+  }
+  var pages=[];
+  try{
+    for(var n=1;n<=doc.numPages;n++){
+      var tc=await(await doc.getPage(n)).getTextContent();
+      var line='';
+      for(var i=0;i<tc.items.length;i++){var it=tc.items[i];line+=(it.str||'')+(it.hasEOL?'\n':' ')}
+      pages.push(line.replace(/[ \t]+\n/g,'\n').trim());
+    }
+  }finally{try{doc.destroy()}catch(e){}}
+  var joined=pages.join('\n\n');
+  if(joined.replace(/\s+/g,'').length<Math.max(20,doc.numPages*2))
+    return'[该 PDF 没有可提取的文字层，可能是扫描件。请让用户在 ICode 预览中用「以图片发送」把页面发给支持图像的模型]';
+  return joined;
+}
+
+async function _wsExtractDocxText(dataUrl){
+  var bytes=_wsDataUrlToBytes(dataUrl);
+  try{
+    await _wsLoadScript(_WS_RICH_CDN.mammoth,'DOCX');
+    var r=await window.mammoth.extractRawText({arrayBuffer:bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength)});
+    var v=r&&r.value||'';
+    if(v.trim())return v;
+  }catch(e){if(e&&e._wsLibMsg)throw e}
+  try{return await _wsDocxXmlText(bytes)}
+  catch(e2){return'[无法解析该 DOCX：文件可能已损坏，或是被改扩展名的老式 .doc（请用 Word/WPS 另存为 .docx 后重新导入）]'}
+}
+async function _wsDocxXmlText(bytes){
+  var ents=_wsZipList(bytes);
+  var docEnt=null;
+  for(var i=0;i<ents.length;i++)if(ents[i].name==='word/document.xml'){docEnt=ents[i];break}
+  if(!docEnt)throw new Error('缺少 word/document.xml');
+  var xml=new TextDecoder('utf-8').decode(await _wsZipRead(bytes,docEnt));
+  var t=xml
+    .replace(/<w:tab[^>]*\/?>/g,'\t')
+    .replace(/<w:br[^>]*\/?>/g,'\n')
+    .replace(/<\/w:p>/g,'\n')
+    .replace(/<[^>]+>/g,'');
+  var out=_wsXmlUnescape(t).replace(/\n{3,}/g,'\n\n').trim();
+  if(!out)throw new Error('正文为空');
+  return out;
+}
+/* XLSX / XLS：SheetJS 同时支持两种格式 */
+async function _wsExtractXlsxText(dataUrl){
+  await _wsLoadScript(_WS_RICH_CDN.xlsx,'XLSX');
+  var wb=window.XLSX.read(_wsDataUrlToBytes(dataUrl),{type:'array'});
+  var names=wb.SheetNames||[],parts=[];
+  for(var i=0;i<names.length;i++){
+    var csv=window.XLSX.utils.sheet_to_csv(wb.Sheets[names[i]]);
+    parts.push(names.length>1?('['+names[i]+']\n'+csv):csv);
+  }
+  return parts.join('\n\n');
+}
+/* PPTX：内置 ZIP 读取器抽各页 <a:t> 文本，零新增依赖 */
+async function _wsExtractPptxText(bytes){
+  var ents=_wsZipList(bytes);
+  var slides=ents.filter(function(e){return /^ppt\/slides\/slide\d+\.xml$/i.test(e.name)});
+  if(!slides.length)return'[该 PPTX 中没有可提取的幻灯片文本]';
+  slides.sort(function(a,b){return parseInt(a.name.match(/(\d+)\.xml$/i)[1],10)-parseInt(b.name.match(/(\d+)\.xml$/i)[1],10)});
+  var parts=[];
+  for(var i=0;i<slides.length;i++){
+    var xml=new TextDecoder('utf-8').decode(await _wsZipRead(bytes,slides[i]));
+    var texts=[];
+    xml.replace(/<a:t(?:\s[^>]*)?>([\s\S]*?)<\/a:t>/g,function(mm,t){texts.push(_wsXmlUnescape(t));return mm});
+    parts.push('【第 '+(i+1)+' 页】\n'+texts.join('\n').trim());
+  }
+  return parts.join('\n\n');
+}
+
+async function _wsExtractRtfText(bytes){
+  var src='';
+  for(var i0=0;i0<bytes.length;i0+=0x8000)src+=String.fromCharCode.apply(null,bytes.subarray(i0,i0+0x8000));
+  var cpm={936:'gbk',950:'big5',932:'shift_jis',949:'euc-kr',1252:'windows-1252',65001:'utf-8'};
+  var cpg=(src.match(/\\ansicpg(\d+)/)||[])[1];
+  var dec;try{dec=new TextDecoder(cpm[parseInt(cpg,10)]||'gbk')}catch(e){dec=new TextDecoder('utf-8')}
+  var out='',i=0,n=src.length,uc=1,hexRun=[];
+  function flushHex(){if(hexRun.length){try{out+=dec.decode(new Uint8Array(hexRun))}catch(e){}hexRun=[]}}
+  while(i<n){
+    var ch=src[i];
+    if(ch==='{'||ch==='}'){flushHex();i++;
+      if(ch==='{'&&src.substr(i,2)==='\\*'){/* 跳过整个扩展目标组 */
+        var depth=1;i+=2;
+        while(i<n&&depth>0){if(src[i]==='{')depth++;else if(src[i]==='}')depth--;else if(src[i]==='\\')i++;i++}
+      }
+      continue;
+    }
+    if(ch!=='\\'){
+      flushHex();
+      if(ch!=='\r'&&ch!=='\n')out+=ch;
+      i++;continue;
+    }
+    /* 控制符 */
+    var m=/^\\'([0-9a-fA-F]{2})/.exec(src.slice(i,i+4));
+    if(m){hexRun.push(parseInt(m[1],16));i+=4;continue}
+    flushHex();
+    var mw=/^\\([a-zA-Z]+)(-?\d+)? ?/.exec(src.slice(i,i+32));
+    if(mw){
+      var w=mw[1],num=mw[2]!==undefined?parseInt(mw[2],10):null;
+      i+=mw[0].length;
+      if(w==='par'||w==='line'||w==='sect'||w==='page')out+='\n';
+      else if(w==='tab')out+='\t';
+      else if(w==='uc'&&num!==null)uc=num;
+      else if(w==='u'&&num!==null){
+        var code=num<0?num+65536:num;
+        try{out+=String.fromCodePoint(code)}catch(e){}
+        for(var s2=0;s2<uc&&i<n;s2++){/* 跳过后备字符（可能是 \'hh 或普通字符） */
+          var fm=/^\\'([0-9a-fA-F]{2})/.exec(src.slice(i,i+4));
+          if(fm)i+=4;else i++;
+        }
+      }else if(w==='bin'&&num!==null){i+=Math.max(0,num)}
+      /* 其余控制词（字体、颜色、样式表等）直接忽略 */
+      continue;
+    }
+    /* \\ \{ \} 等转义符 */
+    var esc2=src[i+1];
+    if(esc2==='\\'||esc2==='{'||esc2==='}'){out+=esc2;i+=2;continue}
+    if(esc2==='~'){out+=' ';i+=2;continue}
+    i+=2;
+  }
+  flushHex();
+  out=out.replace(/\n{3,}/g,'\n\n').trim();
+  return out||'[该 RTF 中没有可提取的正文文本]';
+}
+
+
+async function _wsExtractEpubChapters(bytes){
+  var ents=_wsZipList(bytes),byName={};
+  ents.forEach(function(e){byName[e.name]=e});
+  async function readTxt(en){return new TextDecoder('utf-8').decode(await _wsZipRead(bytes,en))}
+  var order=[];
+  try{
+    var cont=byName['META-INF/container.xml'],opfPath=null;
+    if(cont){var cx=await readTxt(cont);var cm=cx.match(/full-path\s*=\s*"([^"]+)"/);if(cm)opfPath=cm[1]}
+    if(opfPath&&byName[opfPath]){
+      var opf=await readTxt(byName[opfPath]);
+      var dir=opfPath.indexOf('/')>-1?opfPath.slice(0,opfPath.lastIndexOf('/')+1):'';
+      var items={};
+      opf.replace(/<item\s+[^>]*>/gi,function(tag){
+        var id=(tag.match(/\bid\s*=\s*"([^"]+)"/)||[])[1],href=(tag.match(/\bhref\s*=\s*"([^"]+)"/)||[])[1];
+        if(id&&href)items[id]=href;return tag});
+      opf.replace(/<itemref\s+[^>]*>/gi,function(tag){
+        var idr=(tag.match(/\bidref\s*=\s*"([^"]+)"/)||[])[1];
+        if(idr&&items[idr]){var pp=dir+decodeURIComponent(items[idr]);if(byName[pp])order.push(byName[pp])}
+        return tag});
+    }
+  }catch(e){}
+  if(!order.length){
+    order=ents.filter(function(e){return /\.x?html?$/i.test(e.name)});
+    order.sort(function(a,b){return a.name<b.name?-1:(a.name>b.name?1:0)});
+  }
+  var out=[],CAP=3000000,used=0;
+  for(var i=0;i<order.length&&used<CAP;i++){
+    var h;try{h=await readTxt(order[i])}catch(e){continue}
+    var ti='';
+    var hm=h.match(/<h[1-3][^>]*>([\s\S]*?)<\/h[1-3]\s*>/i)||h.match(/<title[^>]*>([\s\S]*?)<\/title\s*>/i);
+    if(hm)ti=_wsXmlUnescape(hm[1].replace(/<[^>]+>/g,'')).replace(/\s+/g,' ').trim().slice(0,80);
+    var t=h.replace(/<(script|style)\b[\s\S]*?<\/\1\s*>/gi,'')
+      .replace(/<\/(p|div|h[1-6]|li|tr|section|article|blockquote)\s*>/gi,'\n')
+      .replace(/<br[^>]*\/?>/gi,'\n').replace(/<[^>]+>/g,'');
+    t=_wsXmlUnescape(t).replace(/\n{3,}/g,'\n\n').trim();
+    if(!t)continue;
+    used+=t.length;
+    out.push({title:ti,text:t});
+  }
+  return out;
+}
+
+const IBDocImporter = (function(){
+  function toBase64(buf){
+    let binary = '';
+    const bytes = new Uint8Array(buf);
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i += 32768) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + 32768, len)));
+    }
+    return btoa(binary);
+  }
+
+  async function importFile(file){
+    if(!file) return;
+    const ext = file.name.split('.').pop().toLowerCase();
+    const title = file.name.replace(/\.[^.]+$/, '') || '未命名文档';
+    try {
+      if(typeof toast==='function') toast('正在解析「'+title+'」…');
+      let bookTitle = title;
+      let bookContent = '';
+      
+      if(ext === 'txt' || ext === 'md' || ext === 'markdown'){
+        bookContent = await file.text();
+      } else if(ext === 'pdf') {
+        const buf = await file.arrayBuffer();
+        const b64 = toBase64(buf);
+        const resp = await fetch('https://notes.emberroom.cn/api/ib-sync/parse-document', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: file.name, kind: ext, data: b64 })
+        });
+        if(!resp.ok) {
+          const err = await resp.json().catch(()=>({}));
+          throw new Error(err.detail || ('解析接口异常: ' + resp.status));
+        }
+        const data = await resp.json();
+        bookTitle = data.title || title;
+        bookContent = (data.chapters||[]).map(function(c){ return '# ' + c.title + '\n\n' + c.text; }).join('\n\n---\n\n');
+      } else if(ext === 'epub') {
+        const chapters = await _wsExtractEpubChapters(new Uint8Array(await file.arrayBuffer()));
+        bookContent = chapters.filter(function(c){ return c && typeof c.text === 'string' && c.text.trim(); }).map(function(c){ return (c.title ? '# ' + c.title + '\n\n' : '') + c.text; }).join('\n\n---\n\n');
+      } else {
+        throw new Error('不支持的文件格式（支持 PDF / EPUB / TXT / Markdown）');
+      }
+
+      if(!bookContent.trim()){
+        throw new Error('未提取到可读文本');
+      }
+
+      const post = {
+        id: 'post_' + Date.now(),
+        title: bookTitle,
+        content: bookContent,
+        category: '共读书库',
+        date: new Date().toISOString(),
+        tags: ['共读', ext.toUpperCase()],
+        created: Date.now(),
+        updated: Date.now()
+      };
+      await dbPut('posts', post);
+      if(typeof loadPosts==='function') await loadPosts();
+      alert('成功将《' + bookTitle + '》导入共读书库！\n现在可以在「共读间」或日志里选择这本书与 AI 开启伴读。');
+    } catch(e) {
+      console.error(e);
+      alert('导入失败: ' + e.message);
+    }
+  }
+
+  function pickAndImport(){
+    let inp = document.getElementById('ib-doc-import-input');
+    if(!inp){
+      inp = document.createElement('input');
+      inp.id = 'ib-doc-import-input';
+      inp.type = 'file';
+      inp.accept = '.pdf,.epub,.txt,.md,.markdown';
+      inp.style.display = 'none';
+      document.body.appendChild(inp);
+      inp.onchange = function(){
+        const f = inp.files && inp.files[0];
+        inp.value = '';
+        if(f) importFile(f);
+      };
+    }
+    inp.click();
+  }
+
+  async function importUrl(){
+    const url = prompt('请输入公网文章或书籍链接 (http/https):');
+    if(!url || !url.trim()) return;
+    try {
+      if(typeof toast==='function') toast('正在抓取文章…');
+      const resp = await fetch('https://notes.emberroom.cn/api/ib-sync/parse-document', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: '网络文章', kind: 'url', url: url.trim() })
+      });
+      if(!resp.ok) throw new Error('抓取失败');
+      const data = await resp.json();
+      const content = (data.chapters||[]).map(function(c){ return '# ' + c.title + '\n\n' + c.text; }).join('\n\n---\n\n');
+      const post = {
+        id: 'post_' + Date.now(),
+        title: data.title || '网络文章',
+        content: content,
+        category: '共读书库',
+        date: new Date().toISOString(),
+        tags: ['共读', '网页'],
+        created: Date.now(),
+        updated: Date.now()
+      };
+      await dbPut('posts', post);
+      if(typeof loadPosts==='function') await loadPosts();
+      alert('成功将《' + post.title + '》导入共读书库！');
+    } catch(e) {
+      alert('文章抓取失败: ' + e.message);
+    }
+  }
+
+  return { pickAndImport, importUrl };
+})();
+
 const IBSyncClient = (function(){
   const STORAGE_KEY_CFG = "ib_cloud_sync_cfg";
   const STORAGE_KEY_OUTBOX = "ib_cloud_sync_outbox";
@@ -4409,7 +4790,7 @@ const IBSyncClient = (function(){
       }
 
       let uploaded = 0;
-      const batchSize = 300;
+      const batchSize = 120;
       for (let i = 0; i < totalChanges.length; i += batchSize) {
         const chunk = totalChanges.slice(i, i + batchSize);
         setStatus(`全量上传: ${i}/${totalChanges.length}…`, "上传中…", "#e0a040");
@@ -4461,7 +4842,22 @@ async function dbPutAll(s,arr){
     await new Promise((res,rej)=>{
       const tx=db.transaction(s,'readwrite');
       const st=tx.objectStore(s);
-      for(let j=0;j<chunk.length;j++){try{st.put(chunk[j])}catch(e){}}
+      for(let j=0;j<chunk.length;j++){
+        let item = chunk[j];
+        if(s === 'apiConfigs' && item && item.id){
+          try{
+            const curReq = st.get(item.id);
+            curReq.onsuccess = function(){
+              const cur = curReq.result;
+              if(cur && cur.apiKey && !item.apiKey){ item.apiKey = cur.apiKey; }
+              if(cur && cur.endpoint && !item.endpoint){ item.endpoint = cur.endpoint; }
+              try{ st.put(item); }catch(e){}
+            };
+            continue;
+          }catch(e){}
+        }
+        try{st.put(item)}catch(e){}
+      }
       tx.oncomplete=()=>{_ibFsDirty=true;res()};
       tx.onerror=()=>rej(tx.error);
     });
