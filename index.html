@@ -6074,7 +6074,7 @@ function vtReady(){return !!(_vt&&_vt.apiKey&&_vt.model)}
 async function loadMS(force){
   if(_ms&&!force)return _ms;
   let r=null,ok=false;try{r=await dbGet('apiSettings','memorySettings');ok=true}catch(e){ok=false}
-  const v=Object.assign({id:'memorySettings',budget:2000,contentLen:200},r||{});
+  const v=Object.assign({id:'memorySettings',budget:15000,contentLen:4000},r||{});
   if(ok)_ms=v;/* v66-m：读失败不落缓存，防止把默认值当真值（同 loadMP 的坑） */
   return v;
 }
@@ -9258,7 +9258,7 @@ function _memLineM(m,fid,clen,kws){
 }
 function buildMemBlock(mems,fid,ms,isGroup,groupMemEnabled,userMsg){
   const budget=Math.max(300,(ms&&ms.budget)||2000);
-  const clen=Math.max(40,(ms&&ms.contentLen)||200);
+  const clen=Math.max(40,(ms&&ms.contentLen)||4000);
   const vis=mems.filter(m=>memVisibleTo(m,fid,isGroup,groupMemEnabled));
   if(!vis.length)return'';
   const kws=(()=>{try{return _extractKeywords(String(userMsg||''))}catch(e){return[]}})();
@@ -11623,7 +11623,7 @@ async function buildAmBlocks(cfg,queryText){
   const entries=await amGetEntries(cfg.id);
   if(!entries.length){out.tail='【记忆档案（共 0 条，勿向对方复述此段）】\n（目前为空）';return out}
   const mode=cfg.autoMemMode||'hybrid';
-  const budget=Math.max(300,Math.min(AM_BUDGET_MAX,parseInt(cfg.autoMemBudget)||1200));
+  const budget=Math.max(300,Math.min(AM_BUDGET_MAX,parseInt(cfg.autoMemBudget)||8000));
   const kws=_extractKeywords(queryText);
   const head='【记忆档案（共 '+entries.length+' 条，勿向对方复述此段）】';
   let tail=head,used=head.length;
@@ -12104,7 +12104,7 @@ $('aset-save').addEventListener('click',async()=>{
     temperature:(function(){var _tv=parseFloat($('aset-temp').value);return isNaN(_tv)?1.0:_tv})(),
     autoMem:$('aset-am').classList.contains('on'),
     autoMemMode:$('aset-am-mode').value,
-    autoMemBudget:Math.max(300,Math.min(AM_BUDGET_MAX,parseInt($('aset-am-budget').value)||1200)),
+    autoMemBudget:Math.max(300,Math.min(AM_BUDGET_MAX,parseInt($('aset-am-budget').value)||8000)),
     amRecordOnly:$('aset-am-mute').classList.contains('on'),
     streaming:$('aset-stream').classList.contains('on'),
     thinkingEnabled:$('aset-think').classList.contains('on'),
@@ -12212,13 +12212,13 @@ async function renderApiGlobal(){
     if(isNaN(v))return def;v=Math.min(max,Math.max(min,v));if(inp)inp.value=String(v);return v};
   const ms0=await loadMS(true);
   _msApplyUI('ms-budget2',ms0.budget||2000,2000);
-  _msApplyUI('ms-cut',ms0.contentLen||200,200);
+  _msApplyUI('ms-cut',ms0.contentLen||4000,4000);
   if(!$('ms-budget2')._b){$('ms-budget2')._b=1;
     const _msSave=async()=>{
       const cur=await loadMS(true);
       const upd=Object.assign({},cur,{id:'memorySettings',
         budget:_msVal('ms-budget2',2000,100,99999),
-        contentLen:_msVal('ms-cut',200,50,9999)});
+        contentLen:_msVal('ms-cut',4000,50,9999)});
       try{await dbPut('apiSettings',upd);_ms=upd;toast('记忆设置已保存')}catch(e){toast('保存失败')}};
     const _msSel=selId=>{const sel=$(selId),inp=$(selId+'-custom');
       if(inp)inp.style.display=(sel.value==='custom')?'':'none';
@@ -12434,7 +12434,7 @@ async function renderMemLib(){
   
   try{
     const _ms2=await loadMS();
-    const _bud=Math.max(300,(_ms2&&_ms2.budget)||2000),_cl=Math.max(40,(_ms2&&_ms2.contentLen)||200);
+    const _bud=Math.max(300,(_ms2&&_ms2.budget)||15000),_cl=Math.max(40,(_ms2&&_ms2.contentLen)||4000);
     const _cand=_mems.filter(m=>m.visibility!=='private');
     let _est=0;
     for(const m of _cand){
