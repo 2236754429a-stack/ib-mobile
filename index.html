@@ -4498,6 +4498,53 @@ const IBDocImporter = (function(){
   return { pickAndImport, importUrl };
 })();
 
+/* ═══════════ Kelivo / ChatGPT JSON importer ═══════════
+ * preview() is data-only. commit() is the only database-writing path.
+ * Stable sourceKey values make repeated imports idempotent.
+ */
+const KelivoImport = (function(){
+  const SECRET=/^(?:api.?key|key|secret|client.?secret|access.?token|refresh.?token|auth.?token|token|authorization|password|passwd|cookie|session.?token|bearer|credential|private.?key)$/i;
+  const BINARY=/^(?:dataurl|base64|blob|attachment|attachments|image|images|audio|file|files)$/i;
+  const MAX_TEXT=1000000,MAX_ROWS=20000;
+  function str(v,cap){if(v===undefined||v===null)return '';return String(v).slice(0,cap||MAX_TEXT)}
+  function hash(s){var h=2166136261;for(var i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619)}return (h>>>0).toString(36)}
+  function clean(v,depth,key){
+    if(depth>8||SECRET.test(String(key||''))||BINARY.test(String(key||'')))return undefined;
+    if(typeof v==='string')return /^data:[^,]{1,120};base64,/i.test(v)||/^[A-Za-z0-9+/]{256,}={0,2}$/.test(v.trim())?undefined:v.slice(0,MAX_TEXT);
+    if(v===null||typeof v==='number'||typeof v==='boolean')return v;
+    if(Array.isArray(v)){var a=[];for(var i=0;i<v.length&&a.length<MAX_ROWS;i++){var x=clean(v[i],depth+1,key);if(x!==undefined)a.push(x)}return a}
+    if(typeof v==='object'){var o={};Object.keys(v).slice(0,200).forEach(function(k){var x=clean(v[k],depth+1,k);if(x!==undefined)o[k]=x});return o}
+    return undefined;
+  }
+  function canonical(v){if(Array.isArray(v))return '['+v.map(canonical).join(',')+']';if(v&&typeof v==='object')return '{'+Object.keys(v).sort().map(function(k){return JSON.stringify(k)+':'+canonical(v[k])}).join(',')+'}';return JSON.stringify(v)}
+  function sourceKey(kind,row,identity){var base=str(identity||'');if(!base)base=canonical(clean(row,0));return 'kelivo:'+kind+':'+hash(base)}
+  function unwrap(input){var root=input;for(var i=0;i<5&&root&&typeof root==='object'&&!Array.isArray(root);i++){var next=null;['data','export','backup','payload','result'].some(function(k){if(root[k]&&typeof root[k]==='object'){next=root[k];return true}return false});if(!next||next===root)break;root=next}return root}
+  function findArray(root,names,depth){if(!root||depth>5)return null;if(Array.isArray(root))return root;if(typeof root!=='object')return null;for(var i=0;i<names.length;i++)if(Array.isArray(root[names[i]]))return root[names[i]];var ks=Object.keys(root);for(var j=0;j<ks.length;j++){var v=root[ks[j]];if(v&&typeof v==='object'&&!SECRET.test(ks[j])){var r=findArray(v,names,depth+1);if(r)return r}}return null}
+  function val(o,keys){for(var i=0;i<keys.length;i++)if(o&&o[keys[i]]!==undefined&&o[keys[i]]!==null)return o[keys[i]];return ''}
+  function time(v,fallback){var n=typeof v==='number'?v:Number(v);if(!isFinite(n)||n<=0)n=Date.parse(String(v||''));if(!isFinite(n)||n<=0)return fallback===undefined?Date.now():fallback;return n<100000000000?n*1000:n}
+  function content(v){var out='';if(v===undefined||v===null)return '';if(typeof v==='string'||typeof v==='number')out=str(v).trim();else if(Array.isArray(v))out=v.map(content).filter(Boolean).join('\n');else if(typeof v==='object')out=content(v.text!==undefined?v.text:(v.parts!==undefined?v.parts:(v.content!==undefined?v.content:v.value)));else return '';out=out.replace(/data:[^,\s]{1,120};base64,[A-Za-z0-9+/=]+/gi,'').replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{16,}/gi,'[credential removed]').replace(/\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth(?:orization)?)["']?\s*[:=]\s*["']?[^\s,"'}]+/gi,'$1: [credential removed]');return out.trim()}
+  function role(row){var r=String(val(row,['role','sender_role','sender_type','author_role','from','speaker','type'])||'').toLowerCase();if(!r&&row&&row.author)r=String(typeof row.author==='object'?row.author.role:row.author).toLowerCase();if(row&&row.is_user===true)r='user';if(/human|user|prompt|me/.test(r))return 'user';if(/system|developer|tool/.test(r))return 'system';if(/assistant|ai|bot|model|claude|gpt|助手/.test(r))return 'assistant';return ''}
+  function convId(row){return str(val(row,['conversation_id','conversationId','conversationID','chat_id','chatId','thread_id','threadId','conv_id','id']))}
+  function title(row){return str(val(row,['title','name','conversation_title','subject']))||'导入对话'}
+  function flattenMapping(mapping){var out=[];if(!mapping||typeof mapping!=='object')return out;Object.keys(mapping).forEach(function(id){var node=mapping[id]||{},m=node.message||node,c=m.content!==undefined?m.content:(m.text!==undefined?m.text:m.parts),text=content(c);if(!text&&!m.author)return;out.push({id:id,row:m,node:node,text:text,role:role(m),at:time(m.create_time||m.created_at||node.create_time,Date.now())})});out.sort(function(a,b){return a.at-b.at||String(a.id).localeCompare(String(b.id))});return out}
+  function normalize(input,opts){
+    opts=opts||{};var root=unwrap(input),threads=[],messages=[],memories=[],threadBy={},messageSeen={};
+    var crows=findArray(root,['conversation_rows','conversations','conversationRows','chats'],0)||[];
+    var mrows=findArray(root,['message_rows','messages','messageRows','chat_messages','chatMessages'],0)||[];
+    var erows=findArray(root,['memory_entry_rows','memory_entries','memoryEntries','memories','autoMemory'],0)||[];
+    function addThread(cid,row){cid=str(cid)||('conversation_'+threads.length);var sk=sourceKey('thread',row,String(opts.friendId||'')+'|'+cid);if(threadBy[cid])return threadBy[cid];var t={id:'thread_imp_'+hash(sk),friendId:opts.friendId,name:title(row||{}).slice(0,80),memoryEnabled:true,created:time(val(row||{},['created_at','createdAt','create_time','timestamp']),Date.now()),kind:'import',sourceKey:sk,importedFrom:'Kelivo'};threadBy[cid]=t;threads.push(t);return t}
+    function addMessage(row,cid,forced){row=row||{};var rr=forced&&forced.role||role(row);if(rr!=='user'&&rr!=='assistant')return;cid=str(cid||convId(row))||'conversation_0';var t=addThread(cid,row),text=forced&&forced.text!==undefined?forced.text:content(val(row,['content','text','message','body','parts']));if(!text)return;var ident=str(val(row,['id','message_id','messageId','uuid']))||str(forced&&forced.id)||text.slice(0,120)+'|'+time(val(row,['created_at','createdAt','create_time','timestamp','updated_at']),0),sk=sourceKey('message',row,String(opts.friendId||'')+'|'+cid+'|'+ident);if(messageSeen[sk])return;messageSeen[sk]=1;messages.push({id:'msg_imp_'+hash(sk),friendId:opts.friendId,threadId:t.id,role:rr,content:text.slice(0,MAX_TEXT),timestamp:time(val(row,['created_at','createdAt','create_time','timestamp','updated_at']),forced&&forced.at||Date.now()),sourceKey:sk,importedFrom:'Kelivo'})}
+    crows.slice(0,MAX_ROWS).forEach(function(row){if(!row||typeof row!=='object')return;var cid=convId(row)||('conversation_'+threads.length);addThread(cid,row);var flat=flattenMapping(row.mapping||row.message_mapping);if(flat.length)flat.forEach(function(x){addMessage(x.row,cid,x)});var inner=row.messages||row.message_rows||row.chat_messages||[];if(Array.isArray(inner))inner.forEach(function(x){addMessage(x,cid)})});
+    if(root&&typeof root==='object'&&!Array.isArray(root)&&root.mapping){var cid=convId(root)||'conversation_0';flattenMapping(root.mapping).forEach(function(x){addMessage(x.row,cid,x)})}
+    mrows.slice(0,MAX_ROWS).forEach(function(row){if(row&&typeof row==='object')addMessage(row,convId(row)||'conversation_0')});
+    erows.slice(0,MAX_ROWS).forEach(function(row){if(!row||typeof row!=='object')return;var raw=val(row,['content','text','memory','summary','description','value']),text=content(raw);if(!text)return;var ident=str(val(row,['id','entry_id','entryId','uuid']))||text.slice(0,160)+'|'+time(val(row,['created_at','createdAt','timestamp']),0),sk=sourceKey('memory',row,String(opts.friendId||'')+'|'+ident);memories.push({id:'mem_imp_'+hash(sk),title:str(val(row,['title','name'])).slice(0,40)||'导入记忆',oneLine:'',summary:str(val(row,['summary','abstract'])).slice(0,100)||text.replace(/\s+/g,' ').slice(0,100),content:text.slice(0,600),domain:'日常',tags:[],importance:5,valence:0.5,arousal:0.3,pinned:false,resolved:false,visibility:'private',visibleTo:[],excludeFrom:[],rawSource:'Kelivo import',sourceId:ident,sourceKey:sk,activationCount:0,created:time(val(row,['created_at','createdAt','timestamp']),Date.now()),lastActivated:Date.now(),createdBy:'user',createdByName:'',editedByUser:false,importedFrom:'Kelivo'})});
+    var uniq={};memories=memories.filter(function(m){if(uniq[m.sourceKey])return false;uniq[m.sourceKey]=1;return true});var warnings=[];if(!threads.length&&!messages.length&&!memories.length)warnings.push('未识别到支持的对话或记忆字段');return {kind:'kelivo',source:'Kelivo / ChatGPT',friendId:opts.friendId,threads:threads,messages:messages,memories:memories,warnings:warnings,counts:{threads:threads.length,messages:messages.length,memories:memories.length}}
+  }
+  async function commit(plan){if(!plan||plan.kind!=='kelivo')throw new Error('无效的 Kelivo 导入预览');var errors=[],counts={threads:0,messages:0,memories:0},oldT=[],oldM=[],oldE=[];try{oldT=await dbGetAll('chatThreads');oldM=await dbGetAll('chatMessages');oldE=await dbGetAll('memories')}catch(e){throw new Error('读取本地索引失败：'+(e.message||e))}var tm={};oldT.forEach(function(x){if(x&&x.sourceKey)tm[x.sourceKey]=x.id});var mm={};oldM.forEach(function(x){if(x&&x.sourceKey)mm[x.sourceKey]=x.id});var em={};oldE.forEach(function(x){if(x&&x.sourceKey)em[x.sourceKey]=x.id});var threadId={};plan.threads.forEach(function(t){var id=tm[t.sourceKey]||t.id;threadId[t.id]=id;t.id=id});plan.messages.forEach(function(m){m.threadId=threadId[m.threadId]||m.threadId;m.id=mm[m.sourceKey]||m.id});plan.memories.forEach(function(m){m.id=em[m.sourceKey]||m.id});var prev=window._ibImporting;window._ibImporting=true;try{try{counts.threads=await dbPutAll('chatThreads',plan.threads)}catch(e){errors.push('话题：'+(e.message||e))}try{counts.messages=await dbPutAll('chatMessages',plan.messages)}catch(e){errors.push('消息：'+(e.message||e))}try{counts.memories=await dbPutAll('memories',plan.memories)}catch(e){errors.push('记忆：'+(e.message||e))}try{await dbPut('apiSettings',{id:'republishHook',pending:true,source:'Kelivo',sourceKeys:plan.threads.map(function(x){return x.sourceKey}).concat(plan.messages.map(function(x){return x.sourceKey}),plan.memories.map(function(x){return x.sourceKey})).slice(0,MAX_ROWS),registeredAt:Date.now()})}catch(e){errors.push('republish hook：'+(e.message||e))}}finally{window._ibImporting=prev}try{if(typeof IBSyncClient!=='undefined'&&IBSyncClient.registerRepublish)IBSyncClient.registerRepublish(plan.threads.map(function(x){return {store:'chatThreads',record:x}}).concat(plan.messages.map(function(x){return {store:'chatMessages',record:x}}),plan.memories.map(function(x){return {store:'memories',record:x}})))}catch(e){}return {counts:counts,errors:errors}}
+  return {preview:function(input,opts){return normalize(input,opts)},commit:commit,sanitize:function(v){return clean(v,0)},sourceKey:sourceKey}
+})();
+if(typeof window!=='undefined')window.KelivoImport=KelivoImport;
+
 const IBSyncClient = (function(){
   const STORAGE_KEY_CFG = "ib_cloud_sync_cfg";
   const STORAGE_KEY_OUTBOX = "ib_cloud_sync_outbox";
@@ -4606,76 +4653,65 @@ const IBSyncClient = (function(){
     saveOutbox(outbox);
   }
 
-  async function push(cfg) {
-    const outbox = getOutbox();
-    if (!outbox.length) return { pushed: 0 };
-    
-    const batch = outbox.slice(0, 500);
-    const resp = await fetch(`${cfg.serverUrl}/push`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Sync-Token": cfg.token
-      },
-      body: JSON.stringify({
-        deviceId: getDeviceId(),
-        changes: batch
-      })
-    });
+  const STORAGE_KEY_REPUBLISH = "ib_cloud_sync_republish_stores";
 
-    if (!resp.ok) {
-      throw new Error(`Push 失败 (${resp.status})`);
-    }
-
-    const data = await resp.json();
-    if (data.ok) {
-      const remain = outbox.slice(batch.length);
-      saveOutbox(remain);
-      return { pushed: batch.length, currentSeq: data.currentSeq };
-    }
-    throw new Error("Push 返回异常");
+  function registerRepublish(records) {
+    const stores=[];
+    (records||[]).forEach(function(item){if(item&&SYNC_STORES.includes(item.store)&&item.record)stores.push(item.store)});
+    if(!stores.length)return;
+    let old=[];try{old=JSON.parse(localStorage.getItem(STORAGE_KEY_REPUBLISH)||"[]")}catch(e){old=[]}
+    stores.concat(old).filter((s,i,a)=>SYNC_STORES.includes(s)&&a.indexOf(s)===i).forEach(()=>{});
+    localStorage.setItem(STORAGE_KEY_REPUBLISH,JSON.stringify(stores.concat(old).filter((s,i,a)=>SYNC_STORES.includes(s)&&a.indexOf(s)===i)));
   }
 
-  async function pull(cfg) {
-    let sinceSeq = parseInt(localStorage.getItem(STORAGE_KEY_SEQ) || "0", 10);
-    const resp = await fetch(`${cfg.serverUrl}/pull?sinceSeq=${sinceSeq}&limit=1000&excludeDevice=${getDeviceId()}`, {
-      headers: {
-        "X-Sync-Token": cfg.token
-      }
-    });
-
-    if (!resp.ok) {
-      throw new Error(`Pull 失败 (${resp.status})`);
+  async function flushRepublish(cfg) {
+    let stores=[];try{stores=JSON.parse(localStorage.getItem(STORAGE_KEY_REPUBLISH)||"[]")}catch(e){stores=[]}
+    stores=stores.filter(s=>SYNC_STORES.includes(s));
+    if(!stores.length)return 0;
+    let uploaded=0;
+    for(const store of stores){
+      const rows=await dbGetAll(store), batch=[];let bytes=0;
+      const send=async()=>{if(!batch.length)return;const resp=await fetch(`${cfg.serverUrl}/push`,{method:"POST",headers:{"Content-Type":"application/json","X-Sync-Token":cfg.token},body:JSON.stringify({deviceId:getDeviceId(),changes:batch.splice(0)})});if(!resp.ok)throw new Error(`导入数据发布失败 (${resp.status})`);const data=await resp.json();if(!data.ok)throw new Error('导入数据发布被拒绝');const bad=(data.results||[]).filter(r=>r&&['stale','invalid','rejected'].includes(r.status));if(bad.length)throw new Error(`导入数据有 ${bad.length} 条未发布`);uploaded+=data.processed!=null?Number(data.processed):0;};
+      for(const row of rows){const key=row&&(row.id||row.name);if(!key)continue;const item={store,recordId:String(key),op:'put',record:row,updatedAt:Date.now(),deviceId:getDeviceId()};const size=JSON.stringify(item).length;if(batch.length&&bytes+size>1800000)await send();batch.push(item);bytes+=size;if(batch.length>=100)await send()}
+      await send();
     }
+    localStorage.removeItem(STORAGE_KEY_REPUBLISH);return uploaded;
+  }
 
-    const data = await resp.json();
-    if (!data.ok) throw new Error("Pull 返回异常");
-
-    if (data.changes && data.changes.length > 0) {
-      _syncApplying = true;
-      try {
-        for (const ch of data.changes) {
-          if (!SYNC_STORES.includes(ch.store)) continue;
-          if (ch.op === "put" && ch.record) {
-            await dbPut(ch.store, ch.record);
-          } else if (ch.op === "delete") {
-            await dbDelete(ch.store, ch.recordId);
-          }
-        }
-      } finally {
-        _syncApplying = false;
-      }
+  async function push(cfg) {
+    let pushed=0;
+    for(let guard=0;guard<100;guard++){
+      const outbox=getOutbox();if(!outbox.length)return {pushed:pushed};
+      const batch=outbox.slice(0,500);const resp=await fetch(`${cfg.serverUrl}/push`,{method:"POST",headers:{"Content-Type":"application/json","X-Sync-Token":cfg.token},body:JSON.stringify({deviceId:getDeviceId(),changes:batch})});
+      if(!resp.ok)throw new Error(`Push 失败 (${resp.status})`);
+      const data=await resp.json();if(!data.ok)throw new Error('Push 返回异常');
+      const results=Array.isArray(data.results)?data.results:[];const failed=results.filter(r=>r&&['stale','invalid','rejected'].includes(r.status));
+      if(failed.length)throw new Error(`有 ${failed.length} 条同步记录被云端拒绝`);
+      saveOutbox(outbox.slice(batch.length));pushed+=batch.length;
     }
+    throw new Error('待同步队列超过安全上限');
+  }
 
-    if (data.currentSeq != null) {
-      localStorage.setItem(STORAGE_KEY_SEQ, String(data.currentSeq));
+  async function pull(cfg, options) {
+    options=options||{};let sinceSeq=options.startSeq!=null?Number(options.startSeq):parseInt(localStorage.getItem(STORAGE_KEY_SEQ)||"0",10);if(!isFinite(sinceSeq)||sinceSeq<0)sinceSeq=0;
+    let pulled=0,skipped=0,pages=0,errors=[],hasMore=true,currentSeq=null;
+    while(hasMore&&pages<1000){
+      const resp=await fetch(`${cfg.serverUrl}/pull?sinceSeq=${encodeURIComponent(sinceSeq)}&limit=1000`,{headers:{"X-Sync-Token":cfg.token}});if(!resp.ok)throw new Error(`Pull 失败 (${resp.status})`);
+      const data=await resp.json();if(!data.ok)throw new Error('Pull 返回异常');const changes=Array.isArray(data.changes)?data.changes:[];currentSeq=data.currentSeq!=null?data.currentSeq:currentSeq;
+      if(changes.length){_syncApplying=true;try{for(const ch of changes){if(!ch||!SYNC_STORES.includes(ch.store)){skipped++;continue}try{if(ch.op==='put'&&ch.record)await dbPut(ch.store,ch.record);else if(ch.op==='delete')await dbDelete(ch.store,ch.recordId);else skipped++}catch(e){errors.push((ch.store||'unknown')+'/'+(ch.recordId||'?')+': '+String(e&&e.message||e).slice(0,120))}}}finally{_syncApplying=false}pulled+=changes.length}
+      const next=data.nextSinceSeq!=null?Number(data.nextSinceSeq):(changes.length?Number(changes[changes.length-1].serverSeq||sinceSeq):sinceSeq);hasMore=!!data.hasMore;if(hasMore&&(!isFinite(next)||next<=sinceSeq))throw new Error('Pull 分页游标未前进');sinceSeq=isFinite(next)?next:sinceSeq;if(isFinite(sinceSeq))localStorage.setItem(STORAGE_KEY_SEQ,String(sinceSeq));pages++;if(!changes.length&&!hasMore)break;
     }
+    if(hasMore)throw new Error('Pull 分页超过安全上限');if(errors.length)throw new Error('拉取写入失败 '+errors.length+' 条：'+errors.slice(0,3).join('；'));return {pulled,skipped,hasMore:false,currentSeq,pages};
+  }
 
-    return {
-      pulled: data.changes ? data.changes.length : 0,
-      hasMore: data.hasMore,
-      currentSeq: data.currentSeq
-    };
+  async function downloadAllFromCloud(){
+    if(_isSyncing)return;
+    const cfg=getCfg();
+    if(!confirm('确定要从云端拉取全量数据？本地同 id 记录会按云端内容覆盖。'))return;
+    _isSyncing=true;setStatus('正在从腾讯云拉取全量数据…','全量拉取中…','#e0a040');
+    try{const r=await pull(cfg,{startSeq:0,full:true});setStatus(`全量拉取完成 (${r.pulled}条)`,`已同步`,'var(--accent-light, #70a0e0)');alert(`全量数据拉取完成！共处理 ${r.pulled} 条云端变更。`)}
+    catch(e){console.warn('[IBSync] 全量拉取异常:',e);setStatus(`全量拉取失败: ${e.message}`,'异常','#e06060');alert(`全量拉取失败: ${e.message}`)}
+    finally{_isSyncing=false}
   }
 
   async function syncNow(manual = false) {
@@ -4686,7 +4722,9 @@ const IBSyncClient = (function(){
     _isSyncing = true;
     setStatus("正在与腾讯云同步数据…", "同步中…", "#e0a040");
     try {
+      const republished = await flushRepublish(cfg);
       const pushRes = await push(cfg);
+      pushRes.pushed = (pushRes.pushed || 0) + republished;
       const pullRes = await pull(cfg);
       
       const timeStr = new Date().toLocaleTimeString();
@@ -4827,8 +4865,10 @@ const IBSyncClient = (function(){
 
   return {
     recordChange,
+    registerRepublish,
     syncNow,
     uploadAllLocalData,
+    downloadAllFromCloud,
     initUI,
     toggleAutoSync,
     toggleSettings,
@@ -4845,26 +4885,18 @@ async function dbPutAll(s,arr){
   for(let i=0;i<arr.length;i+=BATCH){
     const chunk=arr.slice(i,i+BATCH);
     await new Promise((res,rej)=>{
-      const tx=db.transaction(s,'readwrite');
-      const st=tx.objectStore(s);
-      for(let j=0;j<chunk.length;j++){
-        let item = chunk[j];
-        if(s === 'apiConfigs' && item && item.id){
-          try{
-            const curReq = st.get(item.id);
-            curReq.onsuccess = function(){
-              const cur = curReq.result;
-              if(cur && cur.apiKey && !item.apiKey){ item.apiKey = cur.apiKey; }
-              if(cur && cur.endpoint && !item.endpoint){ item.endpoint = cur.endpoint; }
-              try{ st.put(item); }catch(e){}
-            };
-            continue;
-          }catch(e){}
-        }
-        try{st.put(item)}catch(e){}
-      }
-      tx.oncomplete=()=>{_ibFsDirty=true;res()};
-      tx.onerror=()=>rej(tx.error);
+      const tx=db.transaction(s,'readwrite'),st=tx.objectStore(s),errors=[];
+      tx.onabort=()=>rej(new Error(s+' 第 '+(i+1)+' 批写入失败：'+(tx.error&&tx.error.message||errors[0]||'IndexedDB 事务中止')));
+      tx.onerror=()=>{};
+      tx.oncomplete=()=>{if(errors.length)rej(new Error(s+' 第 '+(i+1)+' 批有 '+errors.length+' 条未写入：'+errors.slice(0,3).join('；')));else{_ibFsDirty=true;res()}};
+      chunk.forEach(function(raw,j){
+        const item=raw&&typeof raw==='object'?raw:null;
+        if(!item){errors.push('第 '+(i+j+1)+' 条不是对象');return}
+        const put=function(v){try{const req=st.put(v);req.onerror=function(){errors.push('第 '+(i+j+1)+' 条：'+(req.error&&req.error.message||'写入失败'))}}catch(e){errors.push('第 '+(i+j+1)+' 条：'+(e.message||e))}};
+        if(s==='apiConfigs'&&item.id){
+          try{const curReq=st.get(item.id);curReq.onerror=function(){errors.push('第 '+(i+j+1)+' 条读取旧配置失败')};curReq.onsuccess=function(){const cur=curReq.result;if(cur&&cur.apiKey&&!item.apiKey)item.apiKey=cur.apiKey;if(cur&&cur.endpoint&&!item.endpoint)item.endpoint=cur.endpoint;put(item)}}catch(e){errors.push('第 '+(i+j+1)+' 条：'+(e.message||e))}
+        }else put(item);
+      });
     });
   }
   return arr.length;
@@ -12683,8 +12715,12 @@ $('mem-import-file').addEventListener('change',async e=>{
   const arr=Array.isArray(data)?data:(Array.isArray(data.memories)?data.memories:null);
   if(!arr||!arr.length){toast('这个文件里没有记忆条目');return}
   if(!await confirmDlg('并入 '+arr.length+' 条记忆？同 id 记录以文件为准。','导入'))return;
-  try{await dbPutAll('memories',arr.filter(x=>x&&typeof x==='object'));renderMemLib();toast('已导入 '+arr.length+' 条')}
-  catch(err){toast('导入失败')}
+  try{
+    const cleanArr=arr.filter(x=>x&&typeof x==='object').map(x=>KelivoImport.sanitize(x));
+    await dbPutAll('memories',cleanArr);
+    if(typeof IBSyncClient!=='undefined'&&IBSyncClient.registerRepublish)IBSyncClient.registerRepublish(cleanArr.map(record=>({store:'memories',record:record})));
+    renderMemLib();toast('已导入 '+cleanArr.length+' 条，等待云同步')
+  }catch(err){toast('导入失败：'+String(err&&err.message||err).slice(0,100))}
 });
 
 /* ═══════════ DIY 页：MCP 服务器 + 外部工具 ═══════════ */
@@ -12907,13 +12943,13 @@ async function renderDataSum(){
   }
 }
 
-var _mioMode='',_mioBusy=false,_mioData=null,_mioFound=[],_mioSkipped=[];
+var _mioMode='',_mioBusy=false,_mioData=null,_mioFound=[],_mioSkipped=[],_mioKelivoPlan=null;
 var _mioSel={};/* v120-p：#3 本次导入导出勾选（缺省/true=参与，false=跳过） */
 function _mioEl(){return{ov:$('mio-ov'),ti:$('mio-ti'),sub:$('mio-sub'),bd:$('mio-bd'),ft:$('mio-ft')}}
-function _mioClose(){if(_mioBusy){toast('执行中，请稍候');return}var e=_mioEl();if(e.ov)e.ov.hidden=true;_mioData=null;_mioFound=[];_mioSkipped=[]}
+function _mioClose(){if(_mioBusy){toast('执行中，请稍候');return}var e=_mioEl();if(e.ov)e.ov.hidden=true;_mioData=null;_mioFound=[];_mioSkipped=[];_mioKelivoPlan=null}
 var _mioNoKey=false;
 async function _mioOpen(mode){
-  _mioMode=mode;_mioBusy=false;_mioData=null;_mioFound=[];_mioSkipped=[];_mioSel={};
+  _mioMode=mode;_mioBusy=false;_mioData=null;_mioFound=[];_mioSkipped=[];_mioKelivoPlan=null;_mioSel={};
   var e=_mioEl();if(!e.ov)return;
   e.ti.textContent=mode==='import'?'Import':'Export';
   e.sub.textContent=mode==='import'?'导入备份文件':'导出全站备份';
@@ -12951,8 +12987,25 @@ $('import-file').addEventListener('change',async function(ev){
   var data;
   try{data=JSON.parse(String(await f.text()).replace(/^\ufeff/,''))}catch(err){e.bd.innerHTML='<div class="mio-note" style="color:#c96a6a">文件格式错误：不是有效的 JSON 备份。</div>';return}
   _mioData=data;
+  _mioKelivoPlan=null;
   _mioFound=SYNC_STORES.filter(function(s){return Array.isArray(data[s])&&data[s].length});
   _mioSkipped=Object.keys(data).filter(function(k){return Array.isArray(data[k])&&data[k].length&&SYNC_STORES.indexOf(k)===-1});/* 不互通的数据跳过，记入层内与导入日志 */
+  if(!_mioFound.length){
+    var cfgs=[];try{cfgs=await dbGetAll('apiConfigs')}catch(err){}
+    var target=(typeof _activeCfg!=='undefined'&&_activeCfg&&!_activeCfg._group)?_activeCfg:cfgs.find(function(c){return c&&!c.archived})||cfgs[0];
+    _mioKelivoPlan=KelivoImport.preview(data,{friendId:target&&target.id||''});
+    if(_mioKelivoPlan.counts.threads||_mioKelivoPlan.counts.messages||_mioKelivoPlan.counts.memories){
+      if(!target){e.bd.innerHTML='<div class="mio-note" style="color:#c96a6a">已识别 Kelivo/ChatGPT 数据，但导入前请先在 API 页创建一个 API 配置，用于绑定线程与私密记忆。</div>';e.ft.innerHTML='<button class="btn" id="mio-cancel">关闭</button>';$('mio-cancel').addEventListener('click',_mioClose);return}
+      var kh='<div class="mio-note">已识别 '+_mioKelivoPlan.source+' JSON，将绑定到「'+esc(cfgName(target))+'」。</div>';
+      kh+='<div class="mio-row"><span class="mk-box on"></span>话题频道<b>'+_mioKelivoPlan.counts.threads+' 条</b></div>';
+      kh+='<div class="mio-row"><span class="mk-box on"></span>聊天记录<b>'+_mioKelivoPlan.counts.messages+' 条</b></div>';
+      kh+='<div class="mio-row"><span class="mk-box on"></span>记忆库<b>'+_mioKelivoPlan.counts.memories+' 条</b></div>';
+      kh+='<div class="mio-note">预览不写入数据。内容中的密钥、令牌、附件和 base64 数据不会导入；记忆默认为仅该 API 可见。重复导入会按来源键更新，不新增副本。</div>';
+      if(_mioKelivoPlan.warnings.length)kh+='<div class="mio-note">'+esc(_mioKelivoPlan.warnings.join('；'))+'</div>';
+      e.bd.innerHTML=kh;e.ft.innerHTML='<button class="btn" id="mio-cancel">取消</button><button class="btn primary" id="mio-go">确认导入</button>';
+      $('mio-cancel').addEventListener('click',_mioClose);$('mio-go').addEventListener('click',_mioRunImport);return;
+    }
+  }
   var h='';
   if(!_mioFound.length){
     h='<div class="mio-note" style="color:#c96a6a">这个备份里没有手机版可用的数据。</div>';
@@ -12969,17 +13022,26 @@ $('import-file').addEventListener('change',async function(ev){
   $('mio-go').addEventListener('click',_mioRunImport);
 });
 async function _mioRunImport(){
-  if(_mioBusy||!_mioData)return;
+  if(_mioBusy||(!_mioData&&!_mioKelivoPlan))return;
   _mioBusy=true;var e=_mioEl();e.ft.innerHTML='<button class="btn" disabled>导入中…</button>';
-  var fail=[],cnt={};
+  if(_mioKelivoPlan){
+    var kr;
+    try{kr=await KelivoImport.commit(_mioKelivoPlan)}catch(err){kr={counts:{threads:0,messages:0,memories:0},errors:[String(err&&err.message||err)]}}
+    var km='导入完成：话题 '+kr.counts.threads+' 条、聊天记录 '+kr.counts.messages+' 条、记忆 '+kr.counts.memories+' 条'+(kr.errors.length?'；失败：'+kr.errors.join('；'):'');
+    e.bd.insertAdjacentHTML('beforeend','<div class="mio-done">'+esc(km)+'</div>');var kil=$('imp-log');if(kil){kil.style.display='';kil.textContent='上次'+km+'（'+new Date().toLocaleString('zh-CN')+'）'}
+    try{if(typeof IBSyncClient!=='undefined'&&IBSyncClient.syncNow)await IBSyncClient.syncNow(true)}catch(syncErr){kr.errors=(kr.errors||[]).concat('云同步将在下次自动同步时重试：'+String(syncErr&&syncErr.message||syncErr))}
+    _mioBusy=false;_mioData=null;_mioKelivoPlan=null;e.ft.innerHTML='<button class="btn primary" id="mio-cancel">完成</button>';$('mio-cancel').addEventListener('click',_mioClose);try{await loadCfgs();renderFriends()}catch(err){}return;
+  }
+  var fail=[],cnt={},rep=[];
   for(var i=0;i<_mioFound.length;i++){
     var s=_mioFound[i],row=e.bd.querySelector('.mio-row[data-s="'+s+'"]'),st=row&&row.querySelector('.st');
     if(_mioSel[s]===false){if(st)st.textContent='—';continue}/* v120-p：#3 未勾选跳过 */
-    var list=(_mioData[s]||[]).filter(function(x){return x&&typeof x==='object'});cnt[s]=list.length;
-    try{await dbPutAll(s,list);if(st)st.textContent='✓'}
-    catch(err){fail.push(STORE_CN[s]);if(row)row.classList.add('fail');if(st)st.textContent='✕'}
+    var list=(_mioData[s]||[]).filter(function(x){return x&&typeof x==='object'}).map(function(x){return KelivoImport.sanitize(x)});cnt[s]=list.length;
+    try{await dbPutAll(s,list);if(st)st.textContent='✓';if(typeof IBSyncClient!=='undefined')list.forEach(function(record){rep.push({store:s,record:record})})}
+    catch(err){fail.push(STORE_CN[s]+'：'+String(err&&err.message||err).slice(0,140));if(row)row.classList.add('fail');if(st)st.textContent='✕'}
     list=null;_mioData[s]=null;
   }
+  try{if(typeof IBSyncClient!=='undefined'&&IBSyncClient.registerRepublish)IBSyncClient.registerRepublish(rep)}catch(syncErr){fail.push('同步登记：'+String(syncErr&&syncErr.message||syncErr))}
   _about=null;_mp=null;_mpFromDb=false;_vt=null;_ms=null;_ibt=null;_out=null;_outFromDb=false;_cs=null;
   _calEvents=[];_calNotes=[];
   await loadCfgs();await loadMP();
