@@ -20930,7 +20930,7 @@ async function _ibclSaveMemM(btn,m){
 function _callEffMerge(cs,fid){
   cs=cs||{};
   var p=fid&&cs.perApi&&cs.perApi[fid];
-  var base=(!p||!p.use)?Object.assign({},cs):Object.assign({},cs,{tts:(p.tts==='cloud'||p.tts==='off')?p.tts:'sys',sysVoice:String(p.sysVoice||''),provider:/^(el|mm|az|ali|doubao)$/.test(p.provider)?p.provider:'oai',ep:String(p.ep||''),key:String(p.key||''),gid:String(p.gid||''),model:String(p.model||''),voice:String(p.voice||''),rate:Math.max(0.5,Math.min(2,parseFloat(p.rate)||1)),lang:(p.lang&&{en:1,ja:1,ko:1}[p.lang])?p.lang:'',vol:(p.vol!=null&&p.vol!=='')?p.vol:cs.vol});
+  var base=(!p||!p.use)?Object.assign({},cs):Object.assign({},cs,{tts:(p.tts==='cloud'||p.tts==='off')?p.tts:'sys',sysVoice:String(p.sysVoice||''),provider:/^(el|mm|az|ali|doubao)$/.test(p.provider)?p.provider:'oai',ep:String(p.ep||''),key:String(p.key||''),appkey:String(p.appkey||''),gid:String(p.gid||''),model:String(p.model||''),voice:String(p.voice||''),rate:Math.max(0.5,Math.min(2,parseFloat(p.rate)||1)),lang:(p.lang&&{en:1,ja:1,ko:1}[p.lang])?p.lang:'',vol:(p.vol!=null&&p.vol!=='')?p.vol:cs.vol});
   base.vol=Math.max(0.1,Math.min(1,parseFloat(base.vol)||1));
   base.vbOn=!!(p&&p.vbOn);
   base.vbLang=(p&&p.vbLang&&{en:1,ja:1,ko:1}[p.vbLang])?p.vbLang:'';
@@ -21733,8 +21733,12 @@ function ttsUrl(ep){
   if(!/\/v\d+[a-z]*$/i.test(u))u+='/v1';
   return u+'/audio/speech';
 }
+function _ibcDoubaoSpeechText(s){
+  return String(s||'').replace(/[（(](?:轻笑|轻声|叹气|笑|大笑|哭|抽泣|喘气|咳嗽|沉默|停顿|惊讶|疑惑|生气|开心|悲伤|温柔|冷笑|laugh|chuckle|sigh|笑声|哭声|叹息)[^）)]*[）)]/gi,' ').replace(/\s+/g,' ').trim();
+}
 async function cloudFetchTTS(s,cs,signal){
   const prov=(cs&&cs.provider)||'oai';
+  if(prov==='doubao')s=_ibcDoubaoSpeechText(s);
   let res;
   if(prov==='el'){
     if(!cs.key)throw new Error('未配置 ElevenLabs Key');
@@ -21762,22 +21766,22 @@ async function cloudFetchTTS(s,cs,signal){
     const ssml='<speak version="1.0" xml:lang="'+lgA+'"><voice name="'+escX(voA)+'"><prosody rate="'+Math.round((rrA-1)*100)+'%">'+escX(s)+'</prosody></voice></speak>';
     res=await fetch(base,{method:'POST',headers:{'Ocp-Apim-Subscription-Key':cs.key,'Content-Type':'application/ssml+xml','X-Microsoft-OutputFormat':'audio-24khz-48kbitrate-mono-mp3'},body:ssml,signal:signal});
   }else if(prov==='doubao'){
-    const kd9=String(cs.key||'').trim();let ki9=kd9.indexOf(':');if(ki9<0)ki9=kd9.indexOf('|');
-    if(!kd9||ki9<=0)throw new Error('豆包需在 Key 栏填「appid:access_token」（中间英文冒号）');
-    const appid9=kd9.slice(0,ki9).trim(),tok9=kd9.slice(ki9+1).trim();
-    if(!cs.voice)throw new Error('豆包需在「音色」填 voice_type');
-    let baseD=String(cs.ep||'').trim().replace(/\/+$/,'')||'https://openspeech.bytedance.com';
-    const urlD=/\/api\/v1\/tts$/i.test(baseD)?baseD:baseD+'/api/v1/tts';
+    const kd9=String(cs.key||'').trim();
+    if(!kd9)throw new Error('未配置豆包 API Key');
+    if(!cs.voice)throw new Error('豆包需在「音色」填 speaker_id');
+    let baseD=String(cs.ep||'').trim().replace(/\/+$/,'')||'https://openspeech.bytedance.com/api/v3/tts';
+    const urlD=/\/api\/v3\/tts$/i.test(baseD)?baseD:baseD+'/api/v3/tts';
     const rrD=Math.max(0.5,Math.min(2,parseFloat(cs.rate)||1));
-    const bodyD={app:{appid:appid9,token:tok9,cluster:(cs.model||'volcano_tts')},user:{uid:'ib_user'},audio:{voice_type:cs.voice,encoding:'mp3',speed_ratio:rrD},request:{reqid:'ib'+Date.now()+'_'+Math.floor(Math.random()*1e6),text:s,operation:'query'}};
-    const hdrD={'Authorization':'Bearer;'+tok9,'Content-Type':'application/json'};
+    const bodyD={speaker_id:cs.voice,req_params:{text:s,audio_params:{format:'mp3',sample_rate:24000,speech_rate:Math.round((rrD-1)*100)}}};
+    const reqIdD='ib'+Date.now()+'_'+Math.floor(Math.random()*1e6);
+    const hdrD={'X-Api-Key':kd9,'X-Api-Request-Id':reqIdD,'Content-Type':'application/json'};
     let jD=null;
     try{res=await fetch(urlD,{method:'POST',headers:hdrD,body:JSON.stringify(bodyD),signal:signal});if(!res.ok)throw new Error('HTTP '+res.status);jD=await res.json()}
     catch(eD9){const C9=window.Capacitor,H9=(C9&&C9.isNativePlatform&&C9.isNativePlatform())?(C9.Plugins&&C9.Plugins.CapacitorHttp):null;
       if(!H9||typeof H9.request!=='function')throw eD9;
       const n9=await H9.request({url:urlD,method:'POST',headers:hdrD,data:bodyD,connectTimeout:22000,readTimeout:22000});
       jD=(typeof n9.data==='string')?JSON.parse(n9.data):n9.data}
-    if(!jD||jD.code!==3000||!jD.data)throw new Error('豆包 TTS：'+String((jD&&(jD.message||jD.code))||'返回异常').slice(0,60));
+    if(!jD||((jD.code!==undefined&&jD.code!==0&&jD.code!==3000))||!jD.data)throw new Error('豆包 TTS：'+String((jD&&(jD.message||jD.code))||'返回异常').slice(0,60));
     const bs9=atob(String(jD.data)),u89=new Uint8Array(bs9.length);for(let i9=0;i9<bs9.length;i9++)u89[i9]=bs9.charCodeAt(i9);
     return u89.buffer;
   }else if(prov==='ali'){
@@ -23029,7 +23033,7 @@ function _ibcsFillEd(ed,fid){
    +'<div data-g="cloud">'
    +'<div class="f-group"><label>云端服务商</label><div class="sel"><select data-k="provider"><option value="oai">OpenAI 兼容（SiliconFlow / OpenAI / 自建网关）</option><option value="el">ElevenLabs</option><option value="mm">MiniMax</option><option value="az">Azure 微软语音</option><option value="ali">阿里云 Qwen-TTS</option><option value="doubao">豆包（火山引擎语音）</option></select></div></div>'
    +'<div class="f-group"><label>Endpoint</label><input data-k="ep" placeholder="https://api.siliconflow.cn/v1"></div>'
-   +'<div class="f-group"><label>API Key</label><input data-k="key" type="password" autocomplete="off" placeholder="sk-…"></div>'
+   +'<div class="f-group"><label>API Key / Access Key</label><input data-k="key" type="password" autocomplete="off" placeholder="Access Key"></div>'
    +'<div class="f-group" data-g="gid"><label>GroupId（MiniMax 必填）</label><input data-k="gid" placeholder="账号后台「基本信息」里的 GroupId"></div>'
    +'<div class="f-group"><label>模型</label><input data-k="model" placeholder="FunAudioLLM/CosyVoice2-0.5B"></div>'
    +'<div class="f-group"><label>音色（voice）</label><input data-k="voice" placeholder="CosyVoice2 写 模型:音色；ElevenLabs 填 voice_id"></div>'
