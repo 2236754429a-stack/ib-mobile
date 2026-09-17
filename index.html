@@ -21769,12 +21769,13 @@ async function cloudFetchTTS(s,cs,signal){
     const kd9=String(cs.key||'').trim();
     if(!kd9)throw new Error('未配置豆包 API Key');
     if(!cs.voice)throw new Error('豆包需在「音色」填 speaker_id');
-    let baseD=String(cs.ep||'').trim().replace(/\/+$/,'')||'https://openspeech.bytedance.com/api/v3/tts';
+    let baseD=String(cs.ep||'').trim().replace(/\/+$/,'')||'https://openspeech.bytedance.com/api/v3/tts/unidirectional';
     const urlD=/\/api\/v3\/tts$/i.test(baseD)?baseD:baseD+'/api/v3/tts';
     const rrD=Math.max(0.5,Math.min(2,parseFloat(cs.rate)||1));
     const bodyD={speaker_id:cs.voice,req_params:{text:s,audio_params:{format:'mp3',sample_rate:24000,speech_rate:Math.round((rrD-1)*100)}}};
     const reqIdD='ib'+Date.now()+'_'+Math.floor(Math.random()*1e6);
-    const hdrD={'X-Api-Key':kd9,'X-Api-Request-Id':reqIdD,'Content-Type':'application/json'};
+    const hdrD={'X-Api-Key':kd9,'X-Api-Resource-Id':'volc.megatts.voiceclone',
+    'X-Api-Request-Id':reqIdD,'Content-Type':'application/json'};
     let jD=null;
     try{res=await fetch(urlD,{method:'POST',headers:hdrD,body:JSON.stringify(bodyD),signal:signal});if(!res.ok)throw new Error('HTTP '+res.status);jD=await res.json()}
     catch(eD9){const C9=window.Capacitor,H9=(C9&&C9.isNativePlatform&&C9.isNativePlatform())?(C9.Plugins&&C9.Plugins.CapacitorHttp):null;
@@ -23036,7 +23037,7 @@ function _ibcsFillEd(ed,fid){
    +'<div class="f-group"><label>API Key / Access Key</label><input data-k="key" type="password" autocomplete="off" placeholder="Access Key"></div>'
    +'<div class="f-group" data-g="gid"><label>GroupId（MiniMax 必填）</label><input data-k="gid" placeholder="账号后台「基本信息」里的 GroupId"></div>'
    +'<div class="f-group"><label>模型</label><input data-k="model" placeholder="FunAudioLLM/CosyVoice2-0.5B"></div>'
-   +'<div class="f-group"><label>音色（voice）</label><input data-k="voice" placeholder="CosyVoice2 写 模型:音色；ElevenLabs 填 voice_id"></div>'
+   +'<div class="f-group"><label>音色（voice）</label><input data-k="voice" value="S_D7jejZ8f2"></div>'
    +'</div>'
    +'<div class="f-row"><div class="f-group"><label>朗读语言</label><div class="sel"><select data-k="lang"><option value="">中文（默认）</option><option value="en">英语 English</option><option value="ja">日语 日本語</option><option value="ko">韩语 한국어</option></select></div></div>'
    +'<div class="f-group"><label>语速</label><div class="sel"><select data-k="rate"><option value="0.85">0.85×</option><option value="1">1×（默认）</option><option value="1.1">1.1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option></select></div></div>'
