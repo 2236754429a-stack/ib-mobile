@@ -7866,8 +7866,14 @@ async function renderFriends(){
   if(gen!==_friendsGen)return;
   const box=$('friend-list');box.innerHTML='';
   if(!_cfgs.length&&!groups.length){box.innerHTML='<div class="empty">还没有可对话的 AI。<br>到 API 页新增一个配置，或在 Data 页导入电脑版备份。</div>';return}
-  _cfgs.forEach((c,i)=>{
-    const last=lasts[i];
+  /* 按照时间顺序：最新消息的对话排在最前面 */
+  const friendItems = _cfgs.map((c, i) => {
+    const last = lasts[i];
+    const ts = (last && (last.timestamp || last.created)) || (c.created || 0);
+    return { c, last, ts };
+  }).sort((a, b) => b.ts - a.ts);
+
+  friendItems.forEach(({ c, last }) => {
     const d=document.createElement('div');d.className='li';
     const av=document.createElement('div');av.className='li-ava';setAvaEl(av,c.avatar,cfgName(c));
     const main=document.createElement('div');main.className='li-main';
@@ -7882,8 +7888,13 @@ async function renderFriends(){
   const gbox=$('group-list');
   if(gbox){
     gbox.innerHTML='';
-    groups.forEach((g,i)=>{
-      const last=glasts[i];
+    const groupItems = groups.map((g, i) => {
+      const last = glasts[i];
+      const ts = (last && (last.timestamp || last.created)) || (g.created || 0);
+      return { g, last, ts };
+    }).sort((a, b) => b.ts - a.ts);
+
+    groupItems.forEach(({ g, last }) => {
       const names=(g.members||[]).map(id=>{const c=_cfgs.find(x=>x.id===id);return c?cfgName(c):''}).filter(Boolean);
       const d=document.createElement('div');d.className='li';
       const av=document.createElement('div');av.className='li-ava';setAvaEl(av,(_mp.groupAva&&_mp.groupAva[g.id])||'',g.name||'群');/* v62-m t8：自定义群头像 */
@@ -7992,7 +8003,7 @@ async function loadThreadsBar(cfg){
   const bar=document.getElementById('cvd-threads')||convEl('cv-threads');bar.innerHTML='';/* v49i-m：渲染进抽屉 */
   try{_favRowM()}catch(e){}/* v190-p：收藏夹入口随抽屉刷新 */
   if(cfg._group){_threads=[];return}/* 群聊无话题频道 */
-  try{_threads=(await dbGetAll('chatThreads')).filter(t=>t.friendId===cfg.id).sort((a,b)=>(a.created||0)-(b.created||0))}catch(e){_threads=[]}
+  try{_threads=(await dbGetAll('chatThreads')).filter(t=>t.friendId===cfg.id).sort((a,b)=>(b.updated||b.created||0)-(a.updated||a.created||0))}catch(e){_threads=[]}
   const mk=(label,on,fn,lp)=>{
     const c=document.createElement('div');c.className='th-chip'+(on?' on':'');c.textContent=label;
     c.addEventListener('click',fn);if(lp)pressable(c,lp);
