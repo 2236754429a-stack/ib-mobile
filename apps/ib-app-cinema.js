@@ -1,4 +1,5 @@
 /* IB 桌面 APP · 观影室 v1.12.0 —— 选一段手机里的视频、配一份 .srt / .vtt 字幕，和 TA 一起看。
+   v1.12.1（net-sync）：观影历史合成电脑端同步来的网络片——聊天频道（chatThreads）本身在云同步范围里，桌面端把直链/类型/进度写进频道的 cine 字段；库加载时把带 cine 的频道合成进「观影历史」（远程片），点卡片直接重解析、自动跳到电脑端看到的进度、聊天在同一条频道继续；本地网络片点卡片同样改为直接重解析（对齐桌面「点历史卡片＝重新解析自愈」）。
    v1.12.0：「选一部片」一律新开一条记录与频道（key＝hash(文件名)_大小_时间），只有从观影历史点记录再看才接着原频道与聊天；旧记录（无时间后缀）照样能接。
    v1.11.0（降级，根治「看过一次就再也放不了」）：整个「读进内存」路径删除。根因：这台机器的文件选择器给的文件不支持随机读，1.4.0 起每次开播都把整段视频顺序读进一个 Blob 再喂播放器——低配机上第一次能过，上一次的 Blob 还没释放时第二次读就撞上浏览器 Blob 存储上限，源文件读取直接报「network error」，「读进内存再试」同样撞墙，只有杀掉进程（重启几次）才恢复；删观影记录其实无关。现在视频一律按原样直接交给播放器顺序播放（1.3.0 起就实证「新片能放」走的就是这条路），内存里不再有第二份视频；开播后才探一次能否随机读，探不过就只禁拖进度与 «10 10»（提示一句），不影响播放；直挂失败只给「重选文件」与原因。
    v1.10.0：①弹幕修复——1.8.0 说「弹幕在普通舞台上飞」，但 danmaku() 里还留着全屏判断（fs 恒为 false），弹幕键其实一直是死的；现在开着弹幕就飞。②网页形态的全屏：只在浏览器 / PWA 里出全屏键（原生封装环境里不画，一行代码都不跑）——按下走 Fullscreen API 把舞台整块交给浏览器（系统栏由浏览器接管），再按「全屏方向」设置锁方向（跟随画面：横版横屏、竖版竖屏；或定死横 / 竖），全屏里转屏键切换；顶栏 ← 或再按全屏键退出，浏览器侧退出（返回键 / ESC）也同步；底栏第二行是留影 / 输入 / 寄出，全屏里照样能聊；浏览器不放行 Fullscreen API 时退回铺满页面的固定层，方向由系统决定。③设置里「全屏弹幕」改名「弹幕」。
@@ -306,6 +307,13 @@
   async function paintLib(){
     if(!host)return;host.innerHTML='<div class="ci"><div class="ci-lib"><div class="ci-empty">读取片库…</div></div></div>';
     films=[];try{var ks=await ctx.storage.list();for(var i=0;i<ks.length;i++){if(String(ks[i]).indexOf('film_')===0){var v=await ctx.storage.get(ks[i]);if(v&&v.key)films.push(v)}}}catch(e){}
+    try{/* net-sync：电脑端看过的网络片（chatThreads 同步，cine 带直链与进度）合成进观影历史；点开重解析接着看，聊天在同一条已同步频道 */
+      var _ths=await dbGetAll('chatThreads');for(var _ti=0;_ti<_ths.length;_ti++){var _t=_ths[_ti];
+        if(!_t||_t.kind!=='cinema'||!_t.film||!_t.film.hash||!_t.cine||!_t.cine.isNet||!_t.cine.sourceUrl)continue;
+        var _loc=null;for(var _li=0;_li<films.length;_li++)if(films[_li].key===_t.film.hash){_loc=films[_li];break}
+        if(!_loc){films.push({key:_t.film.hash,title:_t.film.title||_t.name||'远程影片',name:_t.film.title||'',isNet:true,sourceUrl:_t.cine.sourceUrl,netKind:_t.cine.netKind||'',size:0,dur:Math.max(Number(_t.film.duration)||0,Number(_t.cine.dur)||0),sec:Number(_t.cine.lastT)||0,done:!!_t.cine.done,cfgId:_t.friendId||'',threadId:_t.id,remote:true,updated:Number(_t.cine.lastTs)||0})}
+        else{var _c=_t.cine;if(Number(_c.lastTs||0)>Number(_loc.updated||0)&&Number(_c.lastT||0)>Number(_loc.sec||0)){_loc.sec=Number(_c.lastT)||0;_loc.updated=Number(_c.lastTs)||0;try{ctx.storage.set('film_'+_loc.key,_loc)}catch(e){}}}}
+    }catch(e){}
     films.sort(function(a,b){return (b.updated||0)-(a.updated||0)});
     try{aiList=(await ctx.chat.list()).filter(function(a){return !a.isGroup})}catch(e){aiList=[]}
     if(!host)return;
@@ -338,8 +346,9 @@
     q('#ci-sub').addEventListener('change',function(){var inp=q('#ci-sub');var f=inp&&inp.files&&inp.files[0];if(inp)inp.value='';if(f)loadSubFile(f)});
     Array.prototype.forEach.call(host.querySelectorAll('.ci-card.go'),function(r){r.addEventListener('click',function(ev){var x=ev.target.closest('.ci-x');if(x){delFilm(x.getAttribute('data-del'));return}var key=r.getAttribute('data-key');var rec=films.filter(function(f){return f.key===key})[0];if(!rec)return;
       if(rec.cfgId&&aiList.some(function(a){return a.id===rec.cfgId})){aiId=rec.cfgId;var s2=q('#ci-ai');if(s2)s2.value=aiId}
-      /* 1.4.0：先出待开始卡，卡上的按钮才弹文件选择器——此前点记录直接弹选择器，像是打不开 */
-      pend={file:null,key:rec.key,title:rec.title,size:rec.size,rec:rec,sub:SUBS[rec.key]||null};paintPending();
+      pend={file:null,key:rec.key,title:rec.title,size:rec.size,rec:rec,sub:SUBS[rec.key]||null};
+      if(rec.isNet&&rec.sourceUrl){pickNetworkFilm(rec.sourceUrl)}/* net-sync：网络片（含电脑同步来的）点卡片＝直接重解析，待开始卡随后出现 */
+      else{/* 1.4.0：先出待开始卡，卡上的按钮才弹文件选择器——此前点记录直接弹选择器，像是打不开 */paintPending()}
       var pb=q('#ci-pend');if(pb){try{pb.scrollIntoView({block:'nearest',behavior:'smooth'})}catch(e){}}})});
     if(pend)paintPending();
   }
@@ -484,7 +493,7 @@
   async function startFilm(){
     if(!pend||(!pend.file&&!pend.netUrl)||!aiId){toast(!aiId?'先选一位 TA':'先选一部片');return}
     var p=pend;pend=null;
-    F={key:p.key,title:p.title,name:p.file?p.file.name:p.title,sourceUrl:p.sourceUrl||((p.rec&&p.rec.sourceUrl)||''),size:p.size||0,dur:(p.rec&&p.rec.dur)||0,sec:0,done:!!(p.rec&&p.rec.done),file:p.file,url:p.file?URL.createObjectURL(p.file):p.netUrl,proxyUrl:p.isNet?p.proxyUrl:undefined,direct:!!p.direct,pxTried:false,seekOk:p.isNet?true:undefined,isNet:!!p.isNet,netKind:p.netKind};/* [v8] 直连优先，云代理回落 *//* 1.5.0：不续播，每次从头；1.11.0：seekOk 开播后才探 */
+    F={key:p.key,title:p.title,name:p.file?p.file.name:p.title,sourceUrl:p.sourceUrl||((p.rec&&p.rec.sourceUrl)||''),size:p.size||0,dur:(p.rec&&p.rec.dur)||0,sec:(p.rec&&Number(p.rec.sec)>30?Number(p.rec.sec):0),done:!!(p.rec&&p.rec.done),file:p.file,url:p.file?URL.createObjectURL(p.file):p.netUrl,proxyUrl:p.isNet?p.proxyUrl:undefined,direct:!!p.direct,pxTried:false,seekOk:p.isNet?true:undefined,isNet:!!p.isNet,netKind:p.netKind};/* [v8] 直连优先，云代理回落 *//* 1.5.0：不续播，每次从头；1.11.0：seekOk 开播后才探 */
     subs=p.sub?p.sub.cues:[];subName=p.sub?p.sub.name:'';held='';chatIds='';
     sum={text:'',upTo:0};try{var sv=await ctx.storage.get('sum_'+F.key);if(sv&&typeof sv==='object')sum={text:String(sv.text||''),upTo:Number(sv.upTo)||0}}catch(e){}
     if(!host||!F)return;
@@ -492,6 +501,7 @@
     if(!await startSession()){leaveFilm();if(host)paintLib();return}
     var cb=q('#ci-cam');if(!canSee()){if(cb)cb.disabled=true;toast('这位 TA 的 API 不识图：看不到画面，只按字幕和进度陪看')}
     paintChat(true);try{if(ctx.chat.busy(sess.cfgId))pendOn()}catch(e){}
+    if(F.sec>30){var _rs=F.sec,_hit=false,_pt=setInterval(function(){try{if(!F||_hit){clearInterval(_pt);return}if(V&&isFinite(V.duration)&&V.duration>10){try{V.currentTime=Math.min(_rs,Math.max(0,V.duration-5))}catch(e){}_hit=true;clearInterval(_pt);toast('接着上次：已跳到 '+fmt(_rs))}}catch(e){clearInterval(_pt)}},800);setTimeout(function(){clearInterval(_pt)},30000)}
   }
   /* ── 全屏（只在网页形态）：舞台整块交给 Fullscreen API，方向经 screen.orientation.lock；浏览器不放行时退回固定层 ── */
   function fsEl(){return document.fullscreenElement||document.webkitFullscreenElement||null}
@@ -595,7 +605,7 @@
   }
   async function leaveFilm(){++_videoGeneration;cancelHlsLoad();destroyHls();clearTimeout(saveT);clearTimeout(wdT);clearTimeout(uiT);clearInterval(pendT);pending=false;typ=null;if(F){try{await ctx.storage.set('film_'+F.key,filmRec())}catch(e){}}if(sess)await endSession();releaseVideo();F=null;subs=[];subName='';sum={text:'',upTo:0};lastSaved=-1;wrapBusy=false;held='';chatIds=''}
   IBApps.register({
-    id:'cinema',name:'观影室',version:'1.12.0',sdk:2,wall:true,headless:true,
+    id:'cinema',name:'观影室',version:'1.12.1',sdk:2,wall:true,headless:true,
     icon:'<rect x="3.5" y="6" width="17" height="12" rx="2.5"/><path d="M3.5 9.5h17M7.5 6v12M16.5 6v12"/><path d="M10.8 11v4l3.4-2z"/>',
     mount:async function(h,c){
       host=h;ctx=c;css();host.style.padding='0';host.style.overflow='hidden';host.style.display='flex';host.style.flexDirection='column';
