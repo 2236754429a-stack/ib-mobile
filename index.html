@@ -4736,14 +4736,14 @@ const IBSyncClient = (function(){
   }
 
   async function push(cfg) {
-    let pushed=0;
+    let pushed=0,droppedTotal=0;
     for(let guard=0;guard<100;guard++){
-      const outbox=getOutbox();if(!outbox.length)return {pushed:pushed};
+      const outbox=getOutbox();if(!outbox.length)return {pushed:pushed,dropped:droppedTotal};
       const batch=outbox.slice(0,500);const resp=await fetch(`${cfg.serverUrl}/push`,{method:"POST",headers:{"Content-Type":"application/json","X-Sync-Token":cfg.token},body:JSON.stringify({deviceId:getDeviceId(),changes:batch})});
       if(!resp.ok)throw new Error(`Push 失败 (${resp.status})`);
       const data=await resp.json();if(!data.ok)throw new Error('Push 返回异常');
       const results=Array.isArray(data.results)?data.results:[];const failed=results.filter(r=>r&&['stale','invalid','rejected'].includes(r.status));
-      if(failed.length)throw new Error(`有 ${failed.length} 条同步记录被云端拒绝`);
+      if(failed.length){const badKeys=new Set(failed.map(r=>r.store+"|"+r.recordId));console.warn("[ib-sync] 云端拒绝并跳过 "+badKeys.size+" 条（防卡死）：",[...badKeys].slice(0,5).join(" , "));saveOutbox(outbox.slice(batch.length));pushed+=batch.length-badKeys.size;droppedTotal+=badKeys.size;continue}
       saveOutbox(outbox.slice(batch.length));pushed+=batch.length;
     }
     throw new Error('待同步队列超过安全上限');
