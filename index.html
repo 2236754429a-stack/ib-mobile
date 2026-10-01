@@ -13059,8 +13059,7 @@ async function _mioRunImport(){
     if(_mioSel[s]===false){if(st)st.textContent='—';continue}/* v120-p：#3 未勾选跳过 */
     var list=(_mioData[s]||[]).filter(function(x){return x&&typeof x==='object'});cnt[s]=list.length;
     if(s==='apiSettings'&&window._ibMergeSettingsM){try{var _mg9=await window._ibMergeSettingsM(list,_ibImpDesk9,_ibForce9);list=_mg9.list;_ibKept9=_mg9.kept||[]}catch(e9){}}/* v301-p：电脑端备份里的手机端记录默认保留本机；通话设置按字段合并 */
-    try{await dbPutAll(s,list);if(st)st.textContent='✓'}
-    if(typeof IBSyncClient!=='undefined')list.forEach(function(record){rep.push({store:s,record:record})});
+    try{await dbPutAll(s,list);if(st)st.textContent='✓';if(typeof IBSyncClient!=='undefined')list.forEach(function(record){rep.push({store:s,record:record})})}
     catch(err){fail.push(STORE_CN[s]);if(row)row.classList.add('fail');if(st)st.textContent='✕'}
     list=null;_mioData[s]=null;
   }
