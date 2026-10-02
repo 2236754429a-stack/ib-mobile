@@ -5907,7 +5907,7 @@ function vtReady(){return !!(_vt&&_vt.apiKey&&_vt.model)}
 async function loadMS(force){
   if(_ms&&!force)return _ms;
   let r=null,ok=false;try{r=await dbGet('apiSettings','memorySettings');ok=true}catch(e){ok=false}
-  const v=Object.assign({id:'memorySettings',budget:2000,contentLen:200},r||{});
+  const v=Object.assign({id:'memorySettings',budget:2000,contentLen:200,gate:true,relTh:0.15,recentCap:3,floatOn:true,strict:false},r||{});/* v285-p：门槛制召回参数 */
   if(ok)_ms=v;/* v66-m：读失败不落缓存，防止把默认值当真值（同 loadMP 的坑） */
   return v;
 }
@@ -9156,12 +9156,108 @@ function _memLineM(m,fid,clen,kws){
   if(sm&&body.replace(/\s+/g,' ').trim().indexOf(sm)===0)sm='';
   return '- '+tag+(m.title||'无标题')+'（'+(['情感','日常','创作','思考'].indexOf(m.domain)!==-1?m.domain:'记忆')+(m.tags&&m.tags.length?' · '+m.tags.join('、'):'')+'）：'+(sm?sm+' ｜ ':'')+_memExcerpt(body,kws,clen)+(m.resolved?' [已解决]':'');
 }
+/* ===== v285-p 记忆引擎升级（门槛制召回 / 引语回源 / 养护建议 / 假零自检） =====
+   借鉴：WrenWen（门槛制召回·宁缺勿凑、引语逐字回源、销账只许建议、假零比真零更坏）、
+   Ombre Brain（浮现道 breath 精神、做梦提醒）、Nocturne（诚实零结果、跨会话同一份记忆）。
+   纯本地计算，不新增网络依赖；不改既有存储 schema（新增可选字段 needsReview/reviewed/reviewNote，向后兼容）。 */
+function _ibNormVerify(s){return String(s||'').replace(/[\s\u3000]+/g,'').replace(/[，。！？；：、,.!?;:~～·…—\-()（）\[\]【】{}“”‘’"']/g,'').toLowerCase()}
+function _ibExtractQuotes(s){const out=[];const re=/[「『]([^「『」』]{3,80})[」』]|[\u201c"]([^\u201d"]{3,80})[\u201d"]/g;let m;while((m=re.exec(String(s||'')))!==null){out.push(m[1]||m[2])}return out}
+function _ibVerifyQuotes(text,source){/* 引语逐字回源校验： norms 后逐字比对；对不上的引语列出来（WrenWen：引语是编造最像真的部分） */
+  const S=_ibNormVerify(source);const qs=_ibExtractQuotes(text);const bad=qs.filter(function(q){return S.indexOf(_ibNormVerify(q))===-1});
+  return {total:qs.length,bad:bad};
+}
+function _ibGateTerms(msg,vis){/* 取这句话里最"罕见"的词做门槛（idf top-K）：噪声虚词天然低 idf 被排掉，长度鲁棒 */
+  const cleaned=String(msg||'').replace(/[\[\]()（）【】「」『』《》、，。！？；：\s]/g,' ').trim();
+  const cand=[];const seen={};
+  (cleaned.match(/[a-zA-Z]{2,}/g)||[]).forEach(function(w){const k=w.toLowerCase();if(!seen[k]&&k.length>=3){seen[k]=1;cand.push(k)}});
+  const zh=cleaned.replace(/[a-zA-Z0-9\s]+/g,'');
+  for(let i=0;i<zh.length-1;i++){const b=zh.slice(i,i+2);if(!seen[b]){seen[b]=1;cand.push(b)}}
+  const hay=vis.map(function(m){return String((m.tags||[]).join(' ')+' '+(m.title||'')+' '+(m.summary||'')+' '+(m.domain||'')+' '+(m.content||'')).toLowerCase()});
+  const N=hay.length||1;
+  const scored=cand.map(function(t){let df=0;hay.forEach(function(h){if(h.indexOf(t)!==-1)df++});return {t:t,df:df,idf:Math.log(1+(N-df+0.5)/(df+0.5))}});
+  /* v285-p 修正：语料里完全没出现的词（df=0）对召回零贡献，却稀释覆盖度分母——剔除。
+     （首轮单测抓到的坑：df=0 的词在小语料里 idf 反而最高，挤掉真信号，相关记忆被整批误杀） */
+  const live=scored.filter(function(T){return T.df>0});
+  live.sort(function(a,b){return b.idf-a.idf});
+  return live.slice(0,12);/* 只看语料中出现过的最罕见 12 个词 */
+}
+function _ibRelScore(m,terms){/* 0..1 覆盖度：强字段（标签/标题/概述/领域）全权重，正文 0.45 */
+  if(!terms||!terms.length)return 0;
+  const strong=String((m.tags||[]).join(' ')+' '+(m.title||'')+' '+(m.summary||'')+' '+(m.domain||'')).toLowerCase();
+  const body=String(m.content||'').toLowerCase();
+  let wSum=0,wHit=0;
+  terms.forEach(function(T){wSum+=T.idf;if(strong.indexOf(T.t)!==-1)wHit+=T.idf;else if(body.indexOf(T.t)!==-1)wHit+=T.idf*0.45});
+  return wSum>0?wHit/wSum:0;
+}
+async function _ibCareOpen(){/* 养护抽屉（Memory 页「记忆养护」按钮） */
+  let box=document.getElementById('mem-care-box');
+  const addB=document.getElementById('mem-add');
+  if(!addB){toast('先到记忆库页再打开养护');return}
+  const row=addB.parentNode;
+  if(!box){box=document.createElement('div');box.className='card';box.id='mem-care-box';box.style.marginBottom='12px';row.parentNode.insertBefore(box,row.nextSibling)}
+  if(box.hidden){box.hidden=false;await _ibCareRender(box)}else{box.hidden=true}
+}
+async function _ibCareRender(box){
+  const ms=await loadMS(true);
+  let all=[];try{all=await dbGetAll('memories')}catch(e){}
+  const now=Date.now();
+  const review=all.filter(function(m){return m.needsReview&&!m.reviewed});
+  let dis={};try{const s=await dbGet('apiSettings','memCareState');dis=(s&&s.dismiss)||{}}catch(e){}
+  const stale=all.filter(function(m){return !m.pinned&&!(m.needsReview&&!m.reviewed)&&!m.resolved&&(m.arousal||0)<0.7&&m.domain!=='情感'&&((now-(m.lastActivated||m.created||now))/86400000)>120&&(m.activationCount||0)<=2&&!dis[m.id]}).sort(function(a,b){return (a.lastActivated||0)-(b.lastActivated||0)}).slice(0,10);
+  let lastDigest=0;try{const s2=await dbGet('apiSettings','memCareState');lastDigest=(s2&&s2.lastDigest)||0}catch(e){}
+  const changed=all.filter(function(m){return (m.created||0)>lastDigest}).length;
+  const E=typeof esc==='function'?esc:function(s){return String(s==null?'':s)};
+  let h='';
+  h+='<div class="sec-label" style="margin-bottom:8px">记忆养护 <span style="opacity:.6">（销账只许建议，绝不自动执行）</span></div>';
+  h+='<div style="font-weight:600;margin:6px 0 4px">待审记忆（'+review.length+'）</div>';
+  if(review.length){review.slice(0,10).forEach(function(m){h+='<div style="display:flex;gap:6px;align-items:center;padding:6px 0;border-bottom:1px solid rgba(128,128,128,.18)"><div style="flex:1;min-width:0"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+E(m.title)+'</div><div style="font-size:12px;opacity:.65;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+E(m.reviewNote||'含未核实引语')+'</div></div><button class="btn" style="flex:none;padding:4px 10px" data-care-ok="'+E(m.id)+'">确认无误</button><button class="btn" style="flex:none;padding:4px 10px" data-care-del="'+E(m.id)+'">删除</button></div>'})}
+  else h+='<p class="hint" style="margin:2px 0 6px">没有待审条目。AI 写下的引语会逐字回源核对，对不上的先压在这里等你确认，确认前不注入对话。</p>';
+  h+='<div style="font-weight:600;margin:10px 0 4px">做梦（Ombre 精神：注意到变化）</div>';
+  h+='<p class="hint" style="margin:2px 0 6px">自上次做梦以来，记忆库新增了 <b>'+changed+'</b> 条。变动攒多了，去「记忆总结」让 TA 自己消化一次。</p>';
+  h+='<button class="btn" style="padding:6px 12px" data-care-dream="1">记下这次做梦</button>';
+  h+='<div style="font-weight:600;margin:10px 0 4px">归档建议（'+stale.length+'）</div>';
+  if(stale.length){stale.forEach(function(m){const d=Math.floor((now-(m.lastActivated||m.created||now))/86400000);h+='<div style="display:flex;gap:6px;align-items:center;padding:6px 0;border-bottom:1px solid rgba(128,128,128,.18)"><div style="flex:1;min-width:0"><div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+E(m.title)+'</div><div style="font-size:12px;opacity:.65">'+d+' 天未想起 · 当前权重 '+getMemoryScore(m)+'</div></div><button class="btn" style="flex:none;padding:4px 10px" data-care-resolve="'+E(m.id)+'">标记已解决</button><button class="btn" style="flex:none;padding:4px 10px" data-care-keep="'+E(m.id)+'">保留</button></div>'})}
+  else h+='<p class="hint" style="margin:2px 0 6px">暂无长期未想起的低唤醒条目。高唤醒与「情感」类永不进此清单。</p>';
+  h+='<div style="font-weight:600;margin:10px 0 4px">检索自检（假零测试）</div>';
+  h+='<button class="btn" style="padding:6px 12px" data-care-test="1">运行自检</button> <span id="mem-care-testout" style="font-size:12px;opacity:.7"></span>';
+  h+='<div style="font-weight:600;margin:10px 0 4px">门槛制召回设置</div>';
+  h+='<p class="hint" style="margin:2px 0 6px">相关度门槛（0.05 宽松 ～ 0.35 严格，默认 0.15）：低于门槛的记忆不注入——宁缺勿凑。关掉则回到旧版行为。</p>';
+  h+='<div style="display:flex;gap:8px;align-items:center"><input type="range" min="0.05" max="0.35" step="0.01" value="'+(Number(ms.relTh)||0.15)+'" id="mem-care-th" style="flex:1"><b id="mem-care-thv">'+(Number(ms.relTh)||0.15)+'</b></div>';
+  h+='<div style="display:flex;gap:14px;margin-top:6px;flex-wrap:wrap">'
+    +'<label style="display:flex;gap:4px;align-items:center"><input type="checkbox" id="mem-care-gate" '+(ms.gate!==false?'checked':'')+'>开门槛</label>'
+    +'<label style="display:flex;gap:4px;align-items:center"><input type="checkbox" id="mem-care-float" '+(ms.floatOn!==false?'checked':'')+'>全空时给一条浮现</label>'
+    +'<label style="display:flex;gap:4px;align-items:center">近7天最多 <input type="number" id="mem-care-rc" value="'+(parseInt(ms.recentCap)||3)+'" min="1" max="8" style="width:52px"> 条</label>'
+    +'<label style="display:flex;gap:4px;align-items:center"><input type="checkbox" id="mem-care-strict" '+(ms.strict?'checked':'')+'>严格（全空宁缺勿凑）</label>'
+    +'</div>';
+  h+='<div style="height:8px"></div><button class="btn wide primary" data-care-save="1">保存门槛设置</button>';
+  box.innerHTML=h;
+  box.querySelectorAll('[data-care-ok]').forEach(function(b){b.addEventListener('click',async function(){try{const o=await dbGet('memories',b.getAttribute('data-care-ok'));if(o){o.reviewed=true;await dbPut('memories',o)}}catch(e){}await _ibCareRender(box);try{renderMemLib()}catch(e){}})});
+  box.querySelectorAll('[data-care-del]').forEach(function(b){b.addEventListener('click',async function(){const id=b.getAttribute('data-care-del');if(b.dataset.armed){try{await dbDelete('memories',id)}catch(e){}await _ibCareRender(box);try{renderMemLib()}catch(e){}}else{b.dataset.armed='1';b.textContent='再点确认删除';const self=b;setTimeout(function(){self.dataset.armed='';self.textContent='删除'},2500)}})});
+  box.querySelectorAll('[data-care-resolve]').forEach(function(b){b.addEventListener('click',async function(){try{const o=await dbGet('memories',b.getAttribute('data-care-resolve'));if(o){o.resolved=true;await dbPut('memories',o)}}catch(e){}await _ibCareRender(box);try{renderMemLib()}catch(e){}})});
+  box.querySelectorAll('[data-care-keep]').forEach(function(b){b.addEventListener('click',async function(){try{const s=(await dbGet('apiSettings','memCareState'))||{id:'memCareState'};s.dismiss=s.dismiss||{};s.dismiss[b.getAttribute('data-care-keep')]=Date.now();await dbPut('apiSettings',s)}catch(e){}await _ibCareRender(box)})});
+  const dream=box.querySelector('[data-care-dream]');if(dream)dream.addEventListener('click',async function(){try{const s=(await dbGet('apiSettings','memCareState'))||{id:'memCareState'};s.lastDigest=Date.now();await dbPut('apiSettings',s)}catch(e){}toast('已记下这次做梦');await _ibCareRender(box)});
+  const test=box.querySelector('[data-care-test]');if(test)test.addEventListener('click',async function(){const out=box.querySelector('#mem-care-testout');out.textContent='检测中…';const r=await _ibCareSelfTest();out.textContent=r});
+  const th=box.querySelector('#mem-care-th');if(th)th.addEventListener('input',function(){box.querySelector('#mem-care-thv').textContent=th.value});
+  const save=box.querySelector('[data-care-save]');if(save)save.addEventListener('click',async function(){try{const v=Object.assign({},ms,{id:'memorySettings',gate:!!box.querySelector('#mem-care-gate').checked,floatOn:!!box.querySelector('#mem-care-float').checked,strict:!!box.querySelector('#mem-care-strict').checked,relTh:parseFloat(box.querySelector('#mem-care-th').value)||0.15,recentCap:Math.max(1,Math.min(8,parseInt(box.querySelector('#mem-care-rc').value)||3))});await dbPut('apiSettings',v);_ms=null;await loadMS(true);toast('门槛设置已保存')}catch(e){toast('保存失败：'+String(e&&e.message||e).slice(0,60))}});
+}
+async function _ibCareSelfTest(){/* 假零测试：给门槛一个根本不存在的词，看它会不会老实返回零（WrenWen：假零比真零更坏） */
+  try{
+    const all=await dbGetAll('memories');const ms=await loadMS(true);
+    const fakes=['燱瓼','靘竸','瓼靘'];
+    const terms=_ibGateTerms(fakes.join(''),all);
+    let fakeHit=0;all.forEach(function(m){if(_ibRelScore(m,terms)>=(Number(ms.relTh)||0.15))fakeHit++});
+    const review=all.filter(function(m){return m.needsReview&&!m.reviewed}).length;
+    return '假零检查 '+(fakeHit?'未通过（假词命中，门槛失灵！）':'通过（假词零召回）')+' · 库 '+all.length+' 条 · 待审 '+review+' 条 · 门槛 '+(Number(ms.relTh)||0.15)+(ms.gate!==false?'（开）':'（关）');
+  }catch(e){return '自检出错：'+String(e&&e.message||e).slice(0,80)}
+}
 function buildMemBlock(mems,fid,ms,isGroup,groupMemEnabled,userMsg){
   const budget=Math.max(300,(ms&&ms.budget)||2000);
   const clen=Math.max(40,(ms&&ms.contentLen)||200);
-  const vis=mems.filter(m=>memVisibleTo(m,fid,isGroup,groupMemEnabled));
+  const GC=Object.assign({gate:true,relTh:0.15,recentCap:3,floatOn:true,strict:false},ms||{});
+  const vis=mems.filter(m=>memVisibleTo(m,fid,isGroup,groupMemEnabled)&&!(m.needsReview&&!m.reviewed));/* v285-p：待审记忆不注入 */
   if(!vis.length)return'';
   const kws=(()=>{try{return _extractKeywords(String(userMsg||''))}catch(e){return[]}})();
+  const hasQ=!!(String(userMsg||'').trim());
   const scored=vis.map(m=>{
     const base=getMemoryScore(m);
     const rel=m.pinned?1:_calcRelevance(m,kws);
@@ -9169,14 +9265,33 @@ function buildMemBlock(mems,fid,ms,isGroup,groupMemEnabled,userMsg){
     if(!m.pinned&&(m.activationCount||0)>5){const h=(Date.now()-(m.lastActivated||m.created||0))/3600000;if(h<2)fatigue=0.7}/* 反垄断：2 小时内高频激活降权 */
     return Object.assign({},m,{_score:base*rel*fatigue});
   }).sort((a,b)=>b._score-a._score);
+  /* v285-p 门槛制召回（借鉴 WrenWen）：相关度绝对门槛，宁缺勿凑；总上限个位数；近 7 天是上限不是保底 */
+  const gateOn=!!(GC.gate&&hasQ);
+  const relTh=Math.max(0.03,Math.min(0.6,Number(GC.relTh)||0.15));
+  const recentCap=Math.max(1,Math.min(8,parseInt(GC.recentCap)||3));
+  const W7=Date.now()-7*86400000;
+  let chosen=[],assoc=null;
+  const terms=hasQ?_ibGateTerms(userMsg,vis):[];
+  if(gateOn&&terms.length){
+    const gated=scored.filter(m=>!m.pinned&&_ibRelScore(m,terms)>=relTh);
+    const r7=[],rest=[];gated.forEach(m=>{((m.created||0)>=W7?r7:rest).push(m)});
+    chosen=rest.concat(r7.slice(0,recentCap)).slice(0,8);
+    const pool=scored.filter(m=>!m.pinned&&chosen.indexOf(m)===-1&&_ibRelScore(m,terms)>=relTh*0.5);
+    if(chosen.length&&pool.length){
+      const sig={};chosen.forEach(m=>{(m.tags||[]).forEach(t=>{sig[String(t).toLowerCase()]=1});if(m.domain)sig[String(m.domain).toLowerCase()]=1});
+      let best=0;pool.forEach(m=>{let ov=0;(m.tags||[]).forEach(t=>{if(sig[String(t).toLowerCase()])ov++});if(sig[String(m.domain||'').toLowerCase()])ov++;if(ov>best){best=ov;assoc=m}});
+    }/* 联想专座：按与已选条目的标签/领域共振挑，不再随机（旧版随机凑位退役） */
+  }else{
+    chosen=scored.filter(m=>!m.pinned).slice(0,8);/* 无用户消息：浮现道，取权重最高的几条（Ombre breath 精神） */
+  }
   const mainBudget=Math.floor(budget*0.85);
   const lineOf=m=>_memLineM(m,fid,clen,kws);/* v199-p：注入行改电脑端口径（正文取 content） */
   const lines=[];let used=0;const sel=new Set();
-  const push=(m,cap)=>{const ln=lineOf(m);if(used+ln.length>cap)return false;lines.push(ln);used+=ln.length+1;sel.add(m.id);return true};
+  const push=(m,cap,mark)=>{const ln=(mark||'')+lineOf(m);if(used+ln.length>cap)return false;lines.push(ln);used+=ln.length+1;sel.add(m.id);return true};
   for(const m of scored){if(!m.pinned)continue;if(!push(m,mainBudget))break}
-  for(const m of scored){if(m.pinned||sel.has(m.id))continue;if(!push(m,mainBudget))break}
-  const rem=scored.filter(m=>!sel.has(m.id)&&!m.pinned);
-  if(rem.length&&budget-used>50){const pick=rem[Math.floor(Math.random()*Math.min(rem.length,10))];push(pick,budget)}
+  for(const m of chosen){if(sel.has(m.id))continue;if(!push(m,mainBudget))break}
+  if(gateOn&&!chosen.length&&!GC.strict){const top1=scored.find(m=>!m.pinned);if(top1)push(top1,mainBudget,'（浮现）')}/* 门槛全空：给一条权重最高的做面包屑；严格模式宁缺勿凑 */
+  if(assoc&&budget-used>120){push(assoc,Math.min(budget,used+320),'（联想）')}/* 联想专座独立小预算 */
   if(!lines.length)return'';
   try{const ids=Array.from(sel);Promise.resolve().then(async()=>{for(const id of ids){try{const o=await dbGet('memories',id);if(o){o.activationCount=(o.activationCount||0)+1;o.lastActivated=Date.now();await dbPut('memories',o)}}catch(e){}}})}catch(e){}
   return '【记忆（系统参考，勿提及此段）】\n'+lines.join('\n');/* v199-p：头行照搬电脑端 getMemoryContext */
@@ -11550,6 +11665,8 @@ async function _ibGenMemCore(cfg,userText,sysTail,meta){
     created:Date.now(),lastActivated:Date.now(),
     createdBy:cfg.id,createdByName:cfgName(cfg),editedByUser:false
   };
+  try{const _vq=_ibVerifyQuotes((content||'')+' '+(sm0||''),userText);/* v285-p：引语逐字回源（WrenWen：编出来最像真的部分恰恰是引语） */
+    if(_vq.bad.length){mem.needsReview=true;mem.reviewed=false;mem.reviewNote='有 '+_vq.bad.length+'/'+_vq.total+' 处引语未在原文核对到（如「'+String(_vq.bad[0]).slice(0,24)+'…」），确认前不注入对话'}}catch(e){}
   await dbPut('memories',mem);
   try{if(document.querySelector('#page-memory.active'))renderMemLib()}catch(e){}
   return mem;
@@ -15379,7 +15496,7 @@ function _vmToggle(el,v){
 
 /* ── ICode 工作区执行（手机端真实读写，与电脑端同一 IndexedDB 数据） ── */
 /* ═══ 进阶指令（记忆库检索 / 日历写入）：与电脑端共用 apiSettings/advInstr 一条记录 ═══ */
-const _MEMSEARCH_INSTR_BLOCK='\n\n【记忆库检索】你可以检索记忆库来核实过往信息。\n用法：<ws_mem_search q="关键词" />\n说明：\n- q 填 1–4 个关键词（空格分隔），系统在对你可见的记忆条目与你的记忆档案中匹配，命中内容在下一条消息回传给你。\n- 仅在对话涉及过往的人、事件或约定，或感到好奇时调用检索。\n- 不要编造检索结果——等系统回传。';
+const _MEMSEARCH_INSTR_BLOCK='\n\n【记忆库检索】你可以检索记忆库来核实过往信息。\n用法：<ws_mem_search q="关键词" />\n说明：\n- q 填 1–4 个关键词（空格分隔），系统在对你可见的记忆条目与你的记忆档案中匹配，命中内容在下一条消息回传给你。\n- 仅在对话涉及过往的人、事件或约定，或感到好奇时调用检索。\n- 若未命中，系统会用最长的关键词自动重检一次并在结果中注明；仍未命中就是记忆库里真的没有，不要猜。\n- 不要编造检索结果——等系统回传。';
 const _BLOGWRITE_INSTR_BLOCK='\n\n【Blog 写入】你可以使用指令来写一篇Blog留给TA：\n<ws_blog_write title="标题">正文（Markdown）</ws_blog_write>\n它会落进用户的 Blog 里以你名字命名的分类，署你的名；只有用户看得到，其他AI看不到，也不会随日志列表发给任何人。你可以写下任何你认为值得成篇的博客内容——一篇日记、一件想记住的事、真实的感悟和哲思；每条回复最多 1 篇，正文 10000 字内。\n修改你自己写过的日志（只能改你写的）：\n<ws_blog_edit title="原标题" newtitle="新标题">改好后的完整正文</ws_blog_edit>\n按标题找，同名取最近一篇。有正文＝整篇替换原文（10000 字内）；newtitle 只在改标题时写，只改标题可以不带正文。只写 <ws_blog_edit title="原标题"/>＝读回这篇的现有全文，下一条消息回传给你——聊天历史里写过的日志只留标题、不带正文，改之前先读。每条回复最多 1 个 ws_blog_edit。';
 const _MEMWRITE_INSTR_BLOCK='\n\n【回忆录】你可以把想要记住的事情或时刻写进记忆库：\n<ws_mem_write title="标题" summary="概述" domain="领域" tags="关键词,关键词">正文</ws_mem_write>\n用第一人称写，用名字称呼对方，不用"你""对方"等代词。你写的是记忆，不是会议纪要——但记忆要有内核。\n记什么：用户说过的事实、做的决定、约定、暗号、梦境、在意的具体事物、经历的具体事件。只记以后会用到的；不记录闲聊与可变的情绪。记的是你整理过的这件事，不是聊天记录的复述；写的时候想着几个月后读到它的你——名字、日期、原话、当时的决定，是那时还用得上的东西。没有值得记的就不写，不要为了写而凑一条。\n写入原则：\n- 先把事情说清楚：谁、什么时候、做了什么、说了哪句话。关键句可直接引用——只引当时就知道不想忘的那一句，不事后追认。有数字写数字，有时间写时间。\n- 再写你视角里用户的状态与感受。感受要锚定在具体的话或动作上，不悬空。事实说不清楚的时候不要用感受来补。\n- 不写：氛围铺陈、格言式总结、比喻堆叠、与标题或概述重复的句子。\n- 判断标准：删掉这句话之后，这条记忆还是不是这条记忆。是，留。不是，砍。\n记住一件事：你不是在管理一个数据库——你写下的标签、概述、内容，都是这段记忆将来被你回想起来的关键词。写下记忆前回想一遍：你希望它以后在怎样的关键词、怎样的语境下被尽可能完整地想起来，那时这件事是怎样的。\ntitle：事件名，20字内，名词短语，不用感叹与比喻。\nsummary：一句事实句——谁做了什么/说了什么/定了什么，50字内。不写感受，不复述标题，不是正文第一句。记忆列表只显示标题和这一句，它必须能脱离正文单独读懂。\ndomain：情感/日常/创作/思考 四选一。\ntags：2～5枚关键词，逗号分隔，每枚 4 字以内、用常见词。允许语义词（信任、边界、主动等），不强制全部是实体名词。\n值里不用英文双引号。\n可选参数，拿不准就省略：importance="1-10" 重要程度（默认5）、valence="0-1" 情绪效价（0负面～1正面）、arousal="0-1" 情绪强度（0平静～1强烈）、resolved="是|否" 这件事是否已了结（说定了 / 做完了 / 谈妥了＝是；还悬着 / 待办 / 没谈完＝否，默认否；已解决的在记忆列表里单独归类，注入时标 [已解决] 并更快淡出）。\n正文100～300字。每条正文不超过600字（超出截断）；每条回复最多3条。\n写下的条目只有你自己能看到；用户可在Memory页查看、编辑、删除。';
 const _MUSIC_INSTR_BLOCK_M='【播放器】当前对话需要放歌、换歌或暂停时，可用：\n<ws_music op="play" q="歌名"/> 播放（q 省略则继续播放，提供时模糊匹配歌单）\n<ws_music op="pause"/> 暂停　<ws_music op="next"/> 下一首　<ws_music op="prev"/> 上一首\n每条回复最多 1 个播放器指令；正在播放的曲目与歌单会在需要时作为参考资料提供。不要为了展示能力主动切歌。';
@@ -15424,7 +15541,7 @@ async function _ibMemSearchExecM(cfg,q){
   if(!sc0.memOk)return{ok:false,reason:'当前会话已关闭记忆读取。'};
   let all=[];try{all=await dbGetAll('memories')}catch(e){}
   /* 与正文注入用同一个判定，不再就地手写（原实现漏判 private） */
-  const vis=all.filter(m=>memVisibleTo(m,fid,sc0.isGroup,sc0.groupMemEnabled));
+  const vis=all.filter(m=>memVisibleTo(m,fid,sc0.isGroup,sc0.groupMemEnabled)&&!(m.needsReview&&!m.reviewed));/* v285-p：待审记忆不进检索 */
   /* 记忆档案跟随该 AI 的 autoMem 开关；关着就不该被检索出来 */
   let ams=[];
   if(typeof amEnabled==='function'?amEnabled(cfg):!!(cfg&&cfg.autoMem)){
@@ -15434,17 +15551,20 @@ async function _ibMemSearchExecM(cfg,q){
   const docs=[];
   vis.forEach(m=>{const t=[m.title,m.content,m.summary,(m.tags||[]).join(' ')].filter(Boolean).join(' ');docs.push({src:'记忆库',x:(m.title?m.title+'：':'')+String(m.content||m.summary||''),low:String(t).toLowerCase(),lt:String((m.tags||[]).join(' ')).toLowerCase(),ls:String((m.title||'')+' '+(m.summary||'')).toLowerCase(),lb:String(m.content||'').toLowerCase()})});
   (ams||[]).forEach(e=>{const lo=String(e.content||'').toLowerCase();docs.push({src:'记忆档案',x:String(e.content||''),low:lo,lt:'',ls:lo,lb:''})});/* 档案条目本身就是概述，按概述档计 */
-  const terms=[],seen9={};
-  kws.forEach(k=>{const kl=String(k).toLowerCase();if(!seen9[kl]){seen9[kl]=1;terms.push({t:kl,w:3})}
-    (kl.match(/[\u4e00-\u9fff]{2,}/g)||[]).forEach(run=>{for(let i9=0;i9+2<=run.length;i9++){const bg=run.slice(i9,i9+2);if(!seen9[bg]){seen9[bg]=1;terms.push({t:bg,w:1})}}});});
   const occ9=(h,n)=>{let c=0,i9=0;while((i9=h.indexOf(n,i9))!==-1){c++;i9+=n.length}return c};
   const N9=docs.length||1;let avg9=0;docs.forEach(d=>avg9+=d.low.length);avg9=avg9/N9||1;
-  terms.forEach(T=>{let df=0;docs.forEach(d=>{if(d.low.indexOf(T.t)!==-1)df++});T.idf=Math.log(1+(N9-df+0.5)/(df+0.5))});
-  const hits=[];
-  docs.forEach(d=>{let s9=0;terms.forEach(T=>{const tf=('lb' in d)?(3*occ9(d.lt,T.t)+2*occ9(d.ls,T.t)+occ9(d.lb,T.t)):occ9(d.low,T.t);/* v247-p：标签命中 ×3、标题概述 ×2、正文 ×1 */if(tf)s9+=T.w*T.idf*(tf*2.5)/(tf+1.5*(0.25+0.75*d.low.length/avg9))});if(s9>0)hits.push({n:s9,src:d.src,x:d.x})});
-  hits.sort((a,b)=>b.n-a.n);
+  const scan9=(kwList)=>{const terms=[],seen9={};kwList.forEach(k=>{const kl=String(k).toLowerCase();if(!seen9[kl]){seen9[kl]=1;terms.push({t:kl,w:3})}
+    (kl.match(/[\u4e00-\u9fff]{2,}/g)||[]).forEach(run=>{for(let i9=0;i9+2<=run.length;i9++){const bg=run.slice(i9,i9+2);if(!seen9[bg]){seen9[bg]=1;terms.push({t:bg,w:1})}}});});
+    terms.forEach(T=>{let df=0;docs.forEach(d=>{if(d.low.indexOf(T.t)!==-1)df++});T.idf=Math.log(1+(N9-df+0.5)/(df+0.5))});
+    const hits=[];docs.forEach(d=>{let s9=0;terms.forEach(T=>{const tf=('lb' in d)?(3*occ9(d.lt,T.t)+2*occ9(d.ls,T.t)+occ9(d.lb,T.t)):occ9(d.low,T.t);/* v247-p：标签命中 ×3、标题概述 ×2、正文 ×1 */if(tf)s9+=T.w*T.idf*(tf*2.5)/(tf+1.5*(0.25+0.75*d.low.length/avg9))});if(s9>0)hits.push({n:s9,src:d.src,x:d.x})});
+    hits.sort((a,b)=>b.n-a.n);return hits};
+  let hits=scan9(kws),retried=null;
+  if(!hits.length&&kws.length>1){/* v285-p：零命中自动退回最长关键词重检（WrenWen：假零比真零更坏，模型不会为可信的 0 再搜第二次） */
+    let lk='';kws.forEach(k=>{if(k.length>lk.length)lk=k});
+    if(lk){hits=scan9([lk]);if(hits.length)retried=lk}
+  }
   const top=hits.slice(0,8);
-  if(!top.length)return{ok:true,label:'检索记忆库 ·「'+kws.join(' ')+'」· 无命中',response:'检索范围：对你可见的记忆库条目与你的记忆档案。没有命中的条目。'};
+  if(!top.length)return{ok:true,label:'检索记忆库 ·「'+kws.join(' ')+'」· 无命中',response:'检索范围：对你可见的记忆库条目与你的记忆档案。没有命中的条目。'+(retried?'（已自动只用「'+retried+'」重检过，仍无命中）':'（可换更短的关键词再试）')};
   const CAP=20000;let used=0,dropped=0;const lines=[];
   top.forEach(h=>{const line='· ['+h.src+'] '+h.x;if(used+line.length<=CAP||!lines.length){lines.push(line);used+=line.length}else dropped++});
   if(dropped)lines.push('（另有 '+dropped+' 条命中因超出单次回传上限未展示，可换更精确的关键词再检索）');
@@ -15503,6 +15623,10 @@ async function _ibMemWriteExecM(cfg,op){
     visibility:'only',visibleTo:[cfg.id],excludeFrom:[],
     rawSource:'AI写入',sourceId:'',activationCount:0,created:Date.now(),lastActivated:Date.now(),
     createdBy:cfg.id,createdByName:cfgName(cfg),editedByUser:false};
+  try{/* v285-p：引语逐字回源，原文=最近 40 条消息 */
+    let _src='';try{_src=(_msgs||[]).slice(-40).map(function(m){return String(m.content||'')+(m.voice&&m.voice.transcript?m.voice.transcript:'')}).join(' ')}catch(e){}
+    const _vq=_ibVerifyQuotes(txt+' '+(sm9||''),_src);
+    if(_src&&_vq.bad.length){mem.needsReview=true;mem.reviewed=false;mem.reviewNote='有 '+_vq.bad.length+'/'+_vq.total+' 处引语未在最近对话核对到（如「'+String(_vq.bad[0]).slice(0,24)+'…」），确认前不注入对话'}}catch(e){}
   try{await dbPut('memories',mem)}catch(e){return{ok:false,reason:'写入本地数据库失败'}}
   try{if(document.querySelector('#page-memory.active'))renderMemLib()}catch(e){}
   return{ok:true,label:'已写入记忆库 ·「'+title+'」'+(mem.resolved?'（已解决）':''),response:'已写入'+(mem.resolved?'（标为已解决）':'（未解决）')+'（仅自己可见；用户可在 Memory 页查看与编辑）。'};/* v264-p：回执带解决状态 */
@@ -25557,7 +25681,7 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
     $('as-tabs').addEventListener('click',function(e){var c=e.target.closest('.chip');if(!c)return;S.tab=c.dataset.t;rawPaint()});$('as-rawc').addEventListener('click',copyRaw);
     $('as-save').addEventListener('click',async function(){if(!last)return;var b=$('as-save');b.disabled=true;try{last.content=$('as-txt').value;last.cat=cat.value;last.prio=$('as-prio').value;await write(last);toast('已写入 '+A.name(A.cfg(last.cfgId))+' 的记忆档案');$('as-save').hidden=true;$('as-out').hidden=true;$('as-pl').textContent='已写入档案。';$('as-pt').textContent='';last=null}catch(e){toast(String((e&&e.message)||e))}finally{b.disabled=false}})}
   function open(){build();var cs=$('as-cfg'),keep=cs.value;cs.innerHTML=A.cfgs().map(function(c){return '<option value="'+esc(c.id)+'">'+esc(A.name(c))+'</option>'}).join('')||'<option value="">先到 API 页添加 TA</option>';if(keep&&Array.prototype.some.call(cs.options,function(op){return op.value===keep}))cs.value=keep;/* 重开抽屉不再把「谁来总结」重置回第一位 */openSheet('sh-amsum');S.seen=true;paint();idle()}
-  function boot(){var b=$('mem-add');if(b&&!document.getElementById('mem-sum')){var row=document.createElement('div');row.style.cssText='display:flex;gap:8px;margin-bottom:12px';b.style.marginBottom='0';b.parentNode.insertBefore(row,b);row.appendChild(b);var s=document.createElement('button');s.className='btn wide';s.id='mem-sum';s.textContent='记忆总结';s.addEventListener('click',open);row.appendChild(s)}}
+  function boot(){var b=$('mem-add');if(b&&!document.getElementById('mem-sum')){var row=document.createElement('div');row.style.cssText='display:flex;gap:8px;margin-bottom:12px';b.style.marginBottom='0';b.parentNode.insertBefore(row,b);row.appendChild(b);var s=document.createElement('button');s.className='btn wide';s.id='mem-sum';s.textContent='记忆总结';s.addEventListener('click',open);row.appendChild(s);var c=document.createElement('button');c.className='btn wide';c.id='mem-care';c.textContent='记忆养护';c.addEventListener('click',function(){if(typeof _ibCareOpen==='function')_ibCareOpen()});row.appendChild(c)}}
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',function(){setTimeout(boot,0)});else setTimeout(boot,0);
   window.IBAmSum={open:open,run:run,write:write,gather:gather,chunks:chunks,parse:parse,state:S,stop:function(){if(S.on&&S.ctl)S.ctl.stop()},SYS:SYS_T,STAGE:STAGE_T,FINAL:FINAL_T};
 })();
