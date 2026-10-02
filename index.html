@@ -191,10 +191,11 @@ const IBSyncClient = (function(){
     let stores=[];try{stores=JSON.parse(localStorage.getItem(STORAGE_KEY_REPUBLISH)||"[]")}catch(e){stores=[]}
     stores=stores.filter(s=>SYNC_STORES.includes(s));
     if(!stores.length)return 0;
+    try{await pull(cfg)}catch(pe){console.warn("[ib-sync] 重发前预拉取失败，本轮放弃全量重发以防覆盖云端:",pe&&pe.message||pe);return 0}
     let uploaded=0;
     for(const store of stores){
       const rows=await dbGetAll(store), batch=[];let bytes=0;
-      const send=async()=>{if(!batch.length)return;const resp=await fetch(`${cfg.serverUrl}/push`,{method:"POST",headers:{"Content-Type":"application/json","X-Sync-Token":cfg.token},body:JSON.stringify({deviceId:getDeviceId(),changes:batch.splice(0)})});if(!resp.ok)throw new Error(`导入数据发布失败 (${resp.status})`);const data=await resp.json();if(!data.ok)throw new Error('导入数据发布被拒绝');const bad=(data.results||[]).filter(r=>r&&['stale','invalid','rejected'].includes(r.status));if(bad.length)throw new Error(`导入数据有 ${bad.length} 条未发布`);uploaded+=data.processed!=null?Number(data.processed):0;};
+      const send=async()=>{if(!batch.length)return;const resp=await fetch(`${cfg.serverUrl}/push`,{method:"POST",headers:{"Content-Type":"application/json","X-Sync-Token":cfg.token},body:JSON.stringify({deviceId:getDeviceId(),mode:"republish",changes:batch.splice(0)})});if(!resp.ok)throw new Error(`导入数据发布失败 (${resp.status})`);const data=await resp.json();if(!data.ok)throw new Error('导入数据发布被拒绝');const bad=(data.results||[]).filter(r=>r&&['stale','invalid','rejected'].includes(r.status));if(bad.length)throw new Error(`导入数据有 ${bad.length} 条未发布`);uploaded+=data.processed!=null?Number(data.processed):0;};
       for(const row of rows){const key=row&&(row.id||row.name);if(!key)continue;const item={store,recordId:String(key),op:'put',record:row,updatedAt:Date.now(),deviceId:getDeviceId()};const size=JSON.stringify(item).length;if(batch.length&&bytes+size>1800000)await send();batch.push(item);bytes+=size;if(batch.length>=100)await send()}
       await send();
     }
