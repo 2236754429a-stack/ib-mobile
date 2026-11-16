@@ -1,8 +1,11 @@
-/* InternalBeyond Mobile — ib-sw.js（Service Worker 模板 · 联网优先，离线回退）
+/* InternalBeyond Mobile — ib-sw.js（Service Worker · 联网优先，离线回退）
    与手机端 HTML 放在同一目录，经 HTTPS 访问时页面会自动注册本文件。
-   只接管本站的 GET 请求；发往 AI 服务商 / 中转站的请求原样放行、绝不缓存。 */
-const IB_CACHE='ib-cache-v5';
-const NAV_TIMEOUT=20000,ASSET_TIMEOUT=9000,FAST_FALLBACK=3500;
+   只接管本站的 GET 请求；发往 AI 服务商 / 中转站的请求原样放行、绝不缓存。
+   v6 修复（2026-10-03）：导航请求去掉 3.5s"快回退"竞速——页面已 3.7MB，移动网络下
+   常超 3.5s，导致旧缓存几乎每轮都赢、用户永远看到旧版。改为真·网络优先：20s 超时
+   才回退缓存/离线页；资源请求维持网络优先 9s。 */
+const IB_CACHE='ib-cache-v6';
+const NAV_TIMEOUT=20000,ASSET_TIMEOUT=9000;
 self.addEventListener('install',function(){self.skipWaiting()});
 self.addEventListener('activate',function(e){e.waitUntil(caches.keys().then(function(ks){return Promise.all(ks.filter(function(k){return k!==IB_CACHE}).map(function(k){return caches.delete(k)}))}).then(function(){return self.clients.claim()}))});
 function withTimeout(p,ms){return new Promise(function(res,rej){var t=setTimeout(function(){rej(new Error('timeout'))},ms);p.then(function(v){clearTimeout(t);res(v)},function(e){clearTimeout(t);rej(e)})})}
@@ -14,12 +17,8 @@ self.addEventListener('fetch',function(e){
   var isNav=e.request.mode==='navigate'||e.request.destination==='document';
   var net=fetch(e.request).then(function(r){if(r&&r.ok){var cp=r.clone();caches.open(IB_CACHE).then(function(c){c.put(e.request,cp)}).catch(function(){})}return r});
   if(isNav){
-    e.waitUntil(net.then(function(){},function(){}));/* 快速回退后让网络请求继续跑完、补写缓存 */
-    e.respondWith(caches.match(e.request,{ignoreSearch:true}).then(function(cached){
-      if(!cached)return withTimeout(net,NAV_TIMEOUT).catch(function(){return offlinePage()});
-      var fast=new Promise(function(res){setTimeout(function(){res(cached)},FAST_FALLBACK)});
-      return Promise.race([withTimeout(net,NAV_TIMEOUT).catch(function(){return cached}),fast]);
-    }));
+    /* v6：网络优先，不再与缓存赛跑。网络 20s 内回来→一定用新版；超时/断网→缓存兜底→离线页 */
+    e.respondWith(withTimeout(net,NAV_TIMEOUT).catch(function(){return caches.match(e.request,{ignoreSearch:true}).then(function(m){return m||offlinePage()})}));
     return;
   }
   e.respondWith(withTimeout(net,ASSET_TIMEOUT).catch(function(){return caches.match(e.request,{ignoreSearch:true}).then(function(m){if(m)return m;throw new Error('offline')})}));
